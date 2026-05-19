@@ -1,0 +1,65 @@
+window.VIF_LISTENER_PROPERTIES = window.VIF_LISTENER_PROPERTIES || {};
+window.VIF_LISTENER_PROPERTIES["TemplatePlugin"] = [
+  { object_methods: ["batch"] },
+  { scene_methods: ["immediate"] },
+  {
+    key: "name",
+    label: "Your Name",
+    type: "text",
+    default: "Bob",
+    tooltip: "Type in our Name",
+  },
+  {
+    key: "gender",
+    label: "Gender",
+    type: "select",
+    default: "box",
+    options: ["male", "female", "not specified"],
+    tooltip: "What is your gender?",
+  },
+  {
+    key: "age",
+    label: "Age",
+    type: "number",
+    default: 25,
+    step: 1,
+    tooltip: "Your age",
+  },
+  { type: "separator", label: "Likes" },
+  {
+    key: "tv",
+    label: "Do you like TV?",
+    type: "boolean",
+    default: true,
+    tooltip: "Do you like to watch TV",
+  },
+  {
+    key: "movies",
+    label: "Do you like Movies?",
+    type: "boolean",
+    default: false,
+    tooltip: "Do you like to watch movies",
+  },
+  {
+    key: "music",
+    label: "Do you like Music?",
+    type: "boolean",
+    default: true,
+    tooltip: "Do you like to listen to music?",
+  },
+  {
+    key: "pets",
+    label: "Name of your Pets",
+    type: "array",
+    item_label: "Pets",
+    fields: [
+      {
+        key: "name",
+        label: "Pets Name",
+        type: "text",
+        default: "",
+        tooltip: "Type your pets name",
+      },
+    ],
+  },
+];

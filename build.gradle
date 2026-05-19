@@ -1,0 +1,150 @@
+plugins {
+    id 'java-library'
+    id 'maven-publish'
+    id 'signing'
+}
+
+// Per-plugin sub-namespace. must NOT be the bare
+// `com.wowza.wms.plugin.videointelligence` — that package already contains a
+// `ReleaseInfo` class in the VIF library jar, and the generated class would
+// collide and be shadowed (VIF's would win, reporting the wrong version).
+group = 'com.wowza.wms.plugin.videointelligence.template'
+version = file('VERSION').text.trim()
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+    withSourcesJar()
+    withJavadocJar()
+}
+
+repositories {
+    mavenCentral()
+    // WSE distribution jars (wms-server, etc.) provided by the
+    // wowza/wse-plugin-builder Docker image (see build.sh). Set
+    // -PwseLibDir=/path/to/WowzaStreamingEngine/lib to build outside Docker.
+    flatDir {
+        dirs "$wseLibDir"
+    }
+}
+
+configurations {
+    // Make compileOnly WSE jars visible to tests so they can compile against
+    // and load classes that reference WMSLogger / IVifEventListener / etc.
+    testCompileOnly.extendsFrom(compileOnly)
+    testRuntimeOnly.extendsFrom(compileOnly)
+}
+
+dependencies {
+    compileOnly 'com.wowza.wms:wms-server:4.10.0'
+    compileOnly 'org.apache.logging.log4j:log4j-core:2.25.3'
+    compileOnly 'org.apache.logging.log4j:log4j-api:2.25.3'
+    compileOnly 'com.wowza.wms.plugin.videointelligence:wse-plugin-video-intelligence:0.5.2'
+    compileOnly 'javax.websocket:javax.websocket-api:1.0'
+
+    testImplementation 'com.wowza.wms.plugin.videointelligence:wse-plugin-video-intelligence:0.5.2'
+    testImplementation platform('org.junit:junit-bom:5.10.2')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.withType(Jar).configureEach {
+    manifest {
+        attributes(
+                'Gradle-Version' : "Gradle ${gradle.gradleVersion}",
+                'Created-By'     : "${System.properties['java.version']} (${System.properties['java.vendor']} ${System.properties['java.vm.version']})",
+                'Name'           : "${project.name}",
+                'Build-Version'  : "${project.version}"
+        )
+    }
+    metaInf {
+        from files('LICENSE')
+    }
+    archiveBaseName = 'wse-plugin-' + projectName
+}
+
+tasks.register('generateReleaseInfo') {
+    group = 'build'
+    Provider<Directory> outputDir = layout.buildDirectory.dir('generated/java') as Provider<Directory>
+    outputs.dir outputDir.get().asFile.absolutePath
+
+    // Capture project values at configuration time -- accessing them inside
+    // doLast triggers a Gradle 10 deprecation (Task.project at execution time).
+    def packageDotPath = project.group.toString()
+    def releaseProjectName = projectName.toString()
+    def releaseVersion = project.version.toString()
+
+    doLast {
+        def packagePath = packageDotPath.replaceAll('\\.', '/')
+        Directory dir = outputDir.get().dir(packagePath)
+        dir.asFile.mkdirs()
+        dir.file('ReleaseInfo.java').asFile.text =
+                """|package $packageDotPath;
+                   |public class ReleaseInfo {
+                   |    public static String getProject() { return "${releaseProjectName}"; }
+                   |    public static String getVersion() { return "${releaseVersion}"; }
+                   |}""".stripMargin()
+    }
+}
+
+sourceSets.main.java.srcDir generateReleaseInfo
+compileJava.dependsOn generateReleaseInfo
+
+tasks.named('test') {
+    useJUnitPlatform()
+}
+
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            from components.java
+            pom {
+                name = project.name
+                description = title
+                url = 'https://github.com/WowzaMediaSystems/wse-plugin-video-intelligence-template'
+                licenses {
+                    license {
+                        name = 'Wowza Public License 1.0'
+                        url = 'https://github.com/WowzaMediaSystems/wse-plugin-video-intelligence-template/blob/main/LICENSE'
+                    }
+                }
+                developers {
+                    developer {
+                        id = 'wowza'
+                        name = 'Wowza Media Systems'
+                        organization = 'Wowza Media Systems'
+                        organizationUrl = 'https://www.wowza.com'
+                    }
+                }
+                scm {
+                    connection = 'scm:git:https://github.com/WowzaMediaSystems/wse-plugin-video-intelligence-template.git'
+                    developerConnection = 'scm:git:ssh://git@github.com/WowzaMediaSystems/wse-plugin-video-intelligence-template.git'
+                    url = 'https://github.com/WowzaMediaSystems/wse-plugin-video-intelligence-template'
+                }
+            }
+        }
+    }
+    repositories {
+        maven {
+            name = 'MavenCentral'
+            // Maven Central Portal staging endpoint. User token from
+            // https://central.sonatype.com/ (View Account > Generate User Token).
+            url = 'https://ossrh-staging-api.central.sonatype.com/service/local/staging/deploy/maven2/'
+            credentials {
+                username = findProperty('mavenCentralUsername') ?: System.getenv('MAVEN_CENTRAL_USERNAME')
+                password = findProperty('mavenCentralPassword') ?: System.getenv('MAVEN_CENTRAL_PASSWORD')
+            }
+        }
+    }
+}
+
+signing {
+    setRequired { gradle.taskGraph.hasTask('publish') }
+    def signingKey = findProperty('mavenCentralGpgSigningKey') ?: System.getenv('MAVEN_CENTRAL_GPG_SIGNING_KEY')
+    def signingPassword = findProperty('mavenCentralGpgSigningPassword') ?: System.getenv('MAVEN_CENTRAL_GPG_SIGNING_PASSWORD')
+    if (signingKey && signingPassword) {
+        useInMemoryPgpKeys(signingKey, signingPassword)
+    }
+    sign publishing.publications.mavenJava
+}
