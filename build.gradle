@@ -1,7 +1,6 @@
 plugins {
     id 'java-library'
-    id 'maven-publish'
-    id 'signing'
+    id 'com.vanniktech.maven.publish.base' version '0.30.0'
 }
 
 // Per-plugin sub-namespace. must NOT be the bare
@@ -10,6 +9,11 @@ plugins {
 // collide and be shadowed (VIF's would win, reporting the wrong version).
 group = 'com.wowza.wms.plugin.videointelligence.eventrecording'
 version = file('VERSION').text.trim()
+
+// Default to stopping at "validated" so a human approves the release in the
+// Portal UI. Override with `-PautoReleaseToCentral=true` (or
+// `ORG_GRADLE_PROJECT_autoReleaseToCentral=true` in CI) to auto-release.
+def autoReleaseToCentral = (project.findProperty('autoReleaseToCentral') ?: 'false').toString().toBoolean()
 
 java {
     toolchain {
@@ -94,6 +98,21 @@ tasks.named('test') {
     useJUnitPlatform()
 }
 
+// ---------------------------------------------------------------------------
+// Maven Central publishing via com.vanniktech.maven.publish (Central Portal).
+//
+// Credentials and signing key come from Gradle properties supplied as env
+// vars in CI (see .github/workflows/release.yml):
+//   ORG_GRADLE_PROJECT_mavenCentralUsername
+//   ORG_GRADLE_PROJECT_mavenCentralPassword
+//   ORG_GRADLE_PROJECT_signingInMemoryKey
+//   ORG_GRADLE_PROJECT_signingInMemoryKeyPassword
+// ---------------------------------------------------------------------------
+mavenPublishing {
+    publishToMavenCentral(com.vanniktech.maven.publish.SonatypeHost.CENTRAL_PORTAL, autoReleaseToCentral)
+    signAllPublications()
+}
+
 publishing {
     publications {
         mavenJava(MavenPublication) {
@@ -124,26 +143,4 @@ publishing {
             }
         }
     }
-    repositories {
-        maven {
-            name = 'MavenCentral'
-            // Maven Central Portal staging endpoint. User token from
-            // https://central.sonatype.com/ (View Account > Generate User Token).
-            url = 'https://ossrh-staging-api.central.sonatype.com/service/local/staging/deploy/maven2/'
-            credentials {
-                username = findProperty('mavenCentralUsername') ?: System.getenv('MAVEN_CENTRAL_USERNAME')
-                password = findProperty('mavenCentralPassword') ?: System.getenv('MAVEN_CENTRAL_PASSWORD')
-            }
-        }
-    }
-}
-
-signing {
-    setRequired { gradle.taskGraph.hasTask('publish') }
-    def signingKey = findProperty('mavenCentralGpgSigningKey') ?: System.getenv('MAVEN_CENTRAL_GPG_SIGNING_KEY')
-    def signingPassword = findProperty('mavenCentralGpgSigningPassword') ?: System.getenv('MAVEN_CENTRAL_GPG_SIGNING_PASSWORD')
-    if (signingKey && signingPassword) {
-        useInMemoryPgpKeys(signingKey, signingPassword)
-    }
-    sign publishing.publications.mavenJava
 }
