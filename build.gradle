@@ -8,7 +8,7 @@ plugins {
 // `com.wowza.wms.plugin.videointelligence` — that package already contains a
 // `ReleaseInfo` class in the VIF library jar, and the generated class would
 // collide and be shadowed (VIF's would win, reporting the wrong version).
-group = 'com.wowza.wms.plugin.videointelligence.template'
+group = 'com.wowza.wms.plugin.videointelligence.eventrecording'
 version = file('VERSION').text.trim()
 
 java {
@@ -39,11 +39,9 @@ configurations {
 dependencies {
     compileOnly 'com.wowza.wms:wms-server:4.10.0'
     compileOnly 'org.apache.logging.log4j:log4j-core:2.25.3'
-    compileOnly 'org.apache.logging.log4j:log4j-api:2.25.3'
-    compileOnly 'com.wowza.wms.plugin.videointelligence:wse-plugin-video-intelligence:0.5.2'
+    compileOnly 'com.wowza.wms.plugin.videointelligence:wse-plugin-video-intelligence:0.6.0'
     compileOnly 'javax.websocket:javax.websocket-api:1.0'
 
-    testImplementation 'com.wowza.wms.plugin.videointelligence:wse-plugin-video-intelligence:0.5.2'
     testImplementation platform('org.junit:junit-bom:5.10.2')
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
@@ -90,6 +88,7 @@ tasks.register('generateReleaseInfo') {
 
 sourceSets.main.java.srcDir generateReleaseInfo
 compileJava.dependsOn generateReleaseInfo
+clean.finalizedBy generateReleaseInfo
 
 tasks.named('test') {
     useJUnitPlatform()
@@ -102,11 +101,11 @@ publishing {
             pom {
                 name = project.name
                 description = title
-                url = 'https://github.com/WowzaMediaSystems/wse-plugin-video-intelligence-template'
+                url = 'https://github.com/WowzaMediaSystems/wse-plugin-video-intelligence-event-recording'
                 licenses {
                     license {
                         name = 'Wowza Public License 1.0'
-                        url = 'https://github.com/WowzaMediaSystems/wse-plugin-video-intelligence-template/blob/main/LICENSE'
+                        url = 'https://github.com/WowzaMediaSystems/wse-plugin-video-intelligence-event-recording/blob/main/LICENSE'
                     }
                 }
                 developers {
@@ -118,9 +117,9 @@ publishing {
                     }
                 }
                 scm {
-                    connection = 'scm:git:https://github.com/WowzaMediaSystems/wse-plugin-video-intelligence-template.git'
-                    developerConnection = 'scm:git:ssh://git@github.com/WowzaMediaSystems/wse-plugin-video-intelligence-template.git'
-                    url = 'https://github.com/WowzaMediaSystems/wse-plugin-video-intelligence-template'
+                    connection = 'scm:git:https://github.com/WowzaMediaSystems/wse-plugin-video-intelligence-event-recording.git'
+                    developerConnection = 'scm:git:ssh://git@github.com/WowzaMediaSystems/wse-plugin-video-intelligence-event-recording.git'
+                    url = 'https://github.com/WowzaMediaSystems/wse-plugin-video-intelligence-event-recording'
                 }
             }
         }
