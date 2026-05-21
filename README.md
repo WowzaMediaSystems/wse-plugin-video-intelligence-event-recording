@@ -140,11 +140,13 @@ For a non-Docker WSE install:
    cp build/libs/wse-plugin-video-intelligence-event-recording-<version>.jar ${WSE_HOME}/lib/
    ```
 
-2. Copy the JS file into the VIF Manager listeners directory of your WSE Manager install:
+2. Copy the JS file into the VIF Manager listeners directory of your WSE Manager installation:
 
    ```bash
-   cp src/main/js/EventRecordingPlugin.js ${WSEM_HOME}/webapps/ROOT/wse-plugins/server/vif/listeners/
+   cp src/main/js/EventRecordingPlugin.js ${WSEM_HOME}/temp/webapps/enginemanager/wse-plugins/server/vif/listeners
    ```
+   (The `temp` directory may not exist yet if the WSE Manager service has not been started yet.)
+
 
 3. Restart Wowza Streaming Engine and Wowza Streaming Engine Manager.
 
