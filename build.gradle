@@ -39,11 +39,9 @@ configurations {
 dependencies {
     compileOnly 'com.wowza.wms:wms-server:4.10.0'
     compileOnly 'org.apache.logging.log4j:log4j-core:2.25.3'
-    compileOnly 'org.apache.logging.log4j:log4j-api:2.25.3'
-    compileOnly 'com.wowza.wms.plugin.videointelligence:wse-plugin-video-intelligence:0.5.2'
+    compileOnly 'com.wowza.wms.plugin.videointelligence:wse-plugin-video-intelligence:0.6.0'
     compileOnly 'javax.websocket:javax.websocket-api:1.0'
 
-    testImplementation 'com.wowza.wms.plugin.videointelligence:wse-plugin-video-intelligence:0.5.2'
     testImplementation platform('org.junit:junit-bom:5.10.2')
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
@@ -90,6 +88,7 @@ tasks.register('generateReleaseInfo') {
 
 sourceSets.main.java.srcDir generateReleaseInfo
 compileJava.dependsOn generateReleaseInfo
+clean.finalizedBy generateReleaseInfo
 
 tasks.named('test') {
     useJUnitPlatform()

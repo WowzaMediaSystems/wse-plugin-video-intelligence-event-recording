@@ -21,14 +21,15 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6
 
-      - name: Extract WSE libs from wse-plugin-builder image
+      - name: Extract WSE libs from wowza-streaming-engine image
         run: |
           mkdir -p wse-lib
           docker run --rm \
             -v "$(pwd)/wse-lib:/output" \
             --user "$(id -u):$(id -g)" \
-            wowza/wse-plugin-builder:4.10.0 \
-            sh -c 'cp /usr/local/WowzaStreamingEngine/lib/*.jar /output/'
+            --entrypoint sh \
+            wowza/wowza-streaming-engine:latest-slim \
+            -c 'cp /usr/local/WowzaStreamingEngine/lib.default/*.jar /output/'
           echo "Extracted $(ls -1 wse-lib/*.jar | wc -l | xargs) WSE JAR files"
 
       - name: Build & test
