@@ -27,7 +27,7 @@ import com.wowza.wms.livestreamrecord.manager.StreamRecorderParameters;
 import com.wowza.wms.logging.WMSLogger;
 import com.wowza.wms.logging.WMSLoggerFactory;
 import com.wowza.wms.plugin.videointelligence.ModuleVideoIntelligence;
-import com.wowza.wms.plugin.videointelligence.VideoIntelligenceService;
+import com.wowza.wms.plugin.videointelligence.api.*;
 import com.wowza.wms.plugin.videointelligence.eventrecording.ReleaseInfo;
 import com.wowza.wms.plugin.videointelligence.message.DetectionResponse;
 import com.wowza.wms.plugin.videointelligence.message.ObjectDetectionData;
@@ -44,6 +44,7 @@ public class EventRecordingPlugin implements IVifEventListener, IStreamRecorderA
 	public static final String MODULE_VERSION = ReleaseInfo.getVersion();
 
 	private static final WMSLogger logger = WMSLoggerFactory.getLogger(EventRecordingPlugin.class);
+	private static final String LOGPREFIX = "VideoIntelligenceService";
 
 	private static class ObjectInfo
 	{
@@ -98,7 +99,7 @@ public class EventRecordingPlugin implements IVifEventListener, IStreamRecorderA
 	{
 		this.appInstance = appInstance;
 		this.stream = stream;
-		this.logPrefix = VideoIntelligenceService.LOGPREFIX + stream.getName() + ":EventRecordingPlugin:";
+		this.logPrefix = LOGPREFIX + stream.getName() + ":EventRecordingPlugin:";
 
 		this.vHostName = appInstance.getVHost().getName();
 		this.appName = appInstance.getApplication().getName();
@@ -406,7 +407,7 @@ public class EventRecordingPlugin implements IVifEventListener, IStreamRecorderA
 					vHostName, appName, appInstanceName);
 			if (vifModule == null)
 				return false;
-			VideoIntelligenceService vifService = vifModule.getVifService(streamName);
+			IVifService vifService = vifModule.getVifService(streamName);
 			if (vifService == null)
 				return false;
 			return vifService.getDetectorInfo().useTranscoder;
