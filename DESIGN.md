@@ -168,7 +168,7 @@ To handle this gracefully, the plugin queries the per-stream `useTranscoder` set
 ModuleVideoIntelligence vifModule = ModuleVideoIntelligence.getModule(
     vHostName, appName, appInstanceName);
 if (vifModule != null) {
-    VideoIntelligenceService vifService = vifModule.getVifService(streamName);
+    IVifService vifService = vifModule.getVifService(streamName);
     if (vifService != null) {
         boolean useTranscoder = vifService.getDetectorInfo().useTranscoder;
     }
