@@ -6,7 +6,7 @@ A Wowza Streaming Engine plugin that creates MP4 recordings when objects are det
 
 - JDK 17+
 - Wowza Streaming Engine with the Video Intelligence Framework enabled
-- `com.wowza.wms.plugin.videointelligence:wse-plugin-video-intelligence:0.5.2`
+- `com.wowza.wms.plugin.videointelligence:wse-plugin-video-intelligence:0.15.0`
   (declared as a `compileOnly` dependency; provided by WSE at runtime)
 
 ## Repository structure
