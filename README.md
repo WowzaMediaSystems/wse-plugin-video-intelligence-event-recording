@@ -1,13 +1,18 @@
 # wse-plugin-video-intelligence-event-recording
 
-A Wowza Streaming Engine plugin that creates MP4 recordings when objects are detected by the Video Intelligence Framework (VIF). It implements `IVifEventListener` and uses the WSE `StreamRecorder` API to capture a configurable back-buffer plus post-detection window, with one continuous file per object-presence event. Webhooks fire on detection start and stop.
+A Wowza Streaming Engine plugin that creates MP4 recordings when objects are detected by the Video Intelligence Framework (VIF) — on live streams and on VOD file jobs. It implements `IVifEventListener`; one continuous file per object-presence event, with a configurable back-buffer before the first detection and a post-detection window after the last.
+
+- **Live stream**: the WSE `StreamRecorder` API records the stream as the event unfolds; the back-buffer comes from the stream's packet buffer. Webhooks fire on detection start and stop.
+- **VOD file job**: the event is cut out of the job's source file (video and audio, no re-encode) once its bounds are known; the back-buffer is any length. A webhook per clip reports the file.
+
+The trigger is the same on both hosts and runs on the media timeline (stream time live, file time on a job), so one listener configuration produces the same clips whether a file is analysed faster or slower than real time.
 
 ## Requirements
 
 - JDK 17+
 - Wowza Streaming Engine with the Video Intelligence Framework enabled
-- `com.wowza.wms.plugin.videointelligence:wse-plugin-video-intelligence:0.15.0`
-  (declared as a `compileOnly` dependency; provided by WSE at runtime)
+- `wse-plugin-video-intelligence` 1.2.x (the VIF controller jar; `compileOnly`, provided by WSE at runtime)
+- mp4parser `isoparser`/`muxer` 1.9.56 at runtime for VOD clips — the VIF controller already ships them in the Engine's `lib/`
 
 ## Repository structure
 
@@ -19,12 +24,16 @@ A Wowza Streaming Engine plugin that creates MP4 recordings when objects are det
 ├── gradle/wrapper/             # Gradle wrapper
 ├── gradlew, gradlew.bat
 ├── build.sh                    # Wraps gradle in wowza/wse-plugin-builder Docker
+├── libs/                       # (untracked) a local wse-plugin-video-intelligence-*.jar to compile against
 ├── VERSION                     # Single source of truth for project version
-├── DESIGN.md                   # Architecture notes (immediate flow, webhook timing, keyframe walk)
+├── DESIGN.md                   # Architecture notes (trigger, live recorder, VOD cut, webhooks)
 ├── src/
 │   ├── main/java/com/wowza/wms/plugin/videointelligence/event/EventRecordingPlugin.java
 │   ├── main/java/com/wowza/wms/plugin/videointelligence/event/EventRecordingFileVersionDelegate.java
-│   └── main/js/EventRecordingPlugin.js   # Manager UI listener properties (deployed to wse.addon/listeners/)
+│   ├── main/java/com/wowza/wms/plugin/videointelligence/eventrecording/   # trigger, backends, naming
+│   ├── main/java/com/wowza/wms/plugin/videointelligence/eventrecording/clip/   # the MP4 cut
+│   ├── main/js/EventRecordingPlugin.js   # Manager UI listener properties (deployed to wse.addon/listeners/)
+│   └── test/                             # JUnit 5; the 4 s MP4 fixture the VOD tests cut
 └── .github/workflows/
     ├── ci.yml                  # Build + test on PR / push to main
     └── release.yml             # Publish to Maven Central on GitHub release
@@ -32,7 +41,7 @@ A Wowza Streaming Engine plugin that creates MP4 recordings when objects are det
 
 ## Configuration
 
-The plugin is configured in `video-intelligence.json` under `vif_event_listeners`. **This configuration is only required if you're not initially configuring the plugin via the VIF Manager UI** -- the easiest path is to add the listener through the UI, which writes the configuration into `video-intelligence.json` automatically.
+The plugin is configured as a listener of a VIF stream configuration. The easiest path is the VIF Manager UI, which offers `EventRecordingPlugin` in the listener editor once the `.js` file is installed, and writes the configuration into `video-intelligence.json` under `vif_event_listeners`:
 
 ```json
 "vif_event_listeners": {
@@ -41,9 +50,13 @@ The plugin is configured in `video-intelligence.json` under `vif_event_listeners
     "methods": ["immediate"],
     "properties": {
       "class_names": ["person", "car"],
+      "min_count": 1,
+      "require_track": false,
       "back_buffer_time": 5000,
       "post_detection_duration": 5000,
       "lost_object_duration_ms": 3000,
+      "merge_gap_ms": 0,
+      "max_clip_ms": null,
       "recording_name_template": "${SourceStreamName}_${RecordingStartTime}",
       "record_stream_name": "",
       "output_path": "",
@@ -53,32 +66,61 @@ The plugin is configured in `video-intelligence.json` under `vif_event_listeners
 }
 ```
 
+Over the v2 REST API the same listener is a `custom` entry of the config's `listeners`:
+
+```json
+"EventRecording": {
+  "type": "custom", "class_name": "EventRecordingPlugin", "trigger": "immediate",
+  "enabled": true, "min_confidence": 0.5,
+  "properties": { "class_names": ["person", "car"], "back_buffer_time": 5000,
+                  "post_detection_duration": 5000, "lost_object_duration_ms": 3000 }
+}
+```
+
 ### Properties Reference
 
 | Property | Type | Default | Description |
 |---|---|---|---|
 | `class_names` | string_list | `["all"]` | Object classes that trigger recording. `"all"` matches any class. |
-| `back_buffer_time` | number | `5000` | Milliseconds of video to capture before the detection event. Uses the WSE incoming stream buffer (~8s available). |
-| `post_detection_duration` | number | `5000` | Milliseconds to continue recording after the last qualifying detection. |
-| `lost_object_duration_ms` | number | `3000` | Milliseconds since an object was last seen before it is considered lost. Wall-clock based, so independent of VIF's response cadence (which interleaves empty responses, detections with no tracking ID, and detections with a confirmed tracking ID). |
+| `min_count` | number | `1` | How many detections of those classes one response needs before it counts as presence. |
+| `require_track` | boolean | `false` | Count only detections that carry a tracking ID (needs tracking on the detector). Off, any detection of the classes counts. |
+| `lost_object_duration_ms` | number | `3000` | How long the classes must be absent before the event ends. Measured on the media timeline, so it is the same length of video live and on a job. |
+| `merge_gap_ms` | number | `0` | Two events closer than this become one recording. |
+| `max_clip_ms` | number | (none) | Ends an event that never stops after this long and starts the next one. |
+| `back_buffer_time` | number | `5000` | Milliseconds of video before the first detection. Live it comes from the WSE incoming stream buffer (~8s available) and starts on a keyframe; on a job it is cut from the file and can be any length. |
+| `post_detection_duration` | number | `5000` | Milliseconds to keep recording after the event ends. |
 | `recording_name_template` | text | `${SourceStreamName}_${RecordingStartTime}` | File naming template. See [Recording File Name Tokens](#recording-file-name-tokens) below. |
-| `record_stream_name` | text | (empty) | Regex pattern to match the stream name to record. Empty records the source stream. To record the VIF transcoder output (with overlays), use `.*-vi$`. The pattern is matched against published streams in the application; the first match is used. |
-| `output_path` | text | (empty) | Directory for recorded files. Empty uses the WSE application default. |
-| `webhooks` | boolean | `true` | Send webhooks on detection start/stop. |
+| `record_stream_name` | text | (empty) | Live only. Regex pattern to match the stream name to record. Empty records the source stream. To record the VIF transcoder output (with overlays), use `.*-vi$`. Ignored on a job. |
+| `output_path` | text | (empty) | Directory for recorded files. Empty uses the WSE application default live, and the source file's directory on a job. |
+| `webhooks` | boolean | `true` | Send webhooks: `detection.start`/`detection.stop` per tracked object live, `recording.started`/`recording.stopped` per clip on a job. |
+
+The listener's own `min_confidence` (the `confidence_threshold` of the `vif_event_listeners` entry) filters detections before they reach the plugin.
 
 ### Recording File Name Tokens
 
 The `recording_name_template` supports the following tokens:
 
-| Token | Example | Description |
-|---|---|---|
-| `${SourceStreamName}` | `myStream` | Stream name |
-| `${BaseFileName}` | `myStream` | Base filename before versioning |
-| `${RecordingStartTime}` | `2026-05-01-12.00.00.000-UTC` | Wall-clock time of the first frame in the recording (accounts for `back_buffer_time`) |
-| `${SegmentNumber}` | `0` | Segment number |
-| `${SegmentTime}` | `2026-05-01-12.00.00.000-UTC` | Segment creation time |
-| `${ClassNames}` | `person_car` | Underscore-joined detected class names that triggered the recording |
-| `${TrackingIds}` | `2_5` | Underscore-joined tracking IDs active when recording started |
+| Token | Live | VOD job | Description |
+|---|---|---|---|
+| `${SourceStreamName}` | `myStream` | `race1` | Stream name, or the source file's name without extension |
+| `${BaseFileName}` | `myStream` | `race1` | Base filename before versioning |
+| `${RecordingStartTime}` | `2026-05-01-12.00.00.000-UTC` | `00.03.39.800` | Wall-clock time of the first frame live (accounts for `back_buffer_time`); the clip's offset into the file on a job |
+| `${SegmentNumber}` | `0` | `0` | Segment number |
+| `${SegmentTime}` | `2026-05-01-12.00.00.000-UTC` | (now) | Segment creation time |
+| `${ClassNames}` | `person_car` | `person_car` | Underscore-joined classes seen during the event |
+| `${TrackingIds}` | `2_5` | `2_5` | Underscore-joined tracking IDs seen during the event |
+
+A name that already exists gets a `_1`, `_2` suffix rather than overwriting the file.
+
+### VOD file jobs
+
+A job submitted to `/v2/vif/vod/jobs` runs the listeners of the configuration it names (a stream group config, or one given inline). The plugin needs nothing beyond that:
+
+- The clip is cut from the job's source file by media time: `[first detection − back_buffer_time, last detection + lost_object_duration_ms + post_detection_duration]`, the start snapped back to the previous keyframe, clamped to the file. Video and audio are copied sample for sample.
+- Nothing is written while an event is open. The cut happens once the job has analysed past the post-detection window, or when the job completes; a job that fails or is cancelled writes nothing.
+- Clips land next to the source file unless `output_path` says otherwise, and are reported by a log line and, with `webhooks` on, a `recording.started` + `recording.stopped` pair carrying `job_id`, `source_file` and the file path.
+- A job resumed after an interruption re-initialises the listener; an event that straddled the interruption yields two clips.
+- Overlays are a live transcoder feature; a VOD clip is the plain source.
 
 ## Installation
 
@@ -154,24 +196,24 @@ For a non-Docker WSE install:
 
 ## Building
 
-The canonical build runs inside the `wowza/wse-plugin-builder:4.10.0` Docker
-image, which provides the Wowza Streaming Engine libs needed at compile
-time (`wms-server`, etc.):
+The canonical build runs inside the `wowza/wse-plugin-builder` Docker image, which provides the Wowza Streaming Engine libs needed at compile time (`wms-server`, etc.):
 
 ```sh
 ./build.sh                 # equivalent to: ./build.sh . build
 ./build.sh . clean         # other gradle tasks: ./build.sh <dir> <task>
 ```
 
-To build outside Docker, point `wseLibDir` at a local WSE installation's
-`lib/` directory:
+The VIF controller jar the listener API lives in is resolved in this order: `-PvicJar=/path/to/wse-plugin-video-intelligence-<version>.jar`, a jar dropped in `libs/` (untracked), or the published `wse-plugin-video-intelligence:1.2.0` artifact.
+
+To build outside Docker, point `wseLibDir` at a local WSE installation's `lib/` directory:
 
 ```sh
-./gradlew build -PwseLibDir=/path/to/WowzaStreamingEngine/lib
+./gradlew build -PwseLibDir=/path/to/WowzaStreamingEngine/lib -PvicJar=/path/to/wse-plugin-video-intelligence-1.2.1.jar
 ```
 
-Either way, artifacts land in `build/libs/`. Drop the resulting JAR into
-`<WSE>/lib/` and restart WSE.
+`build` runs the unit tests: the trigger, the MP4 cut and the listener on a file job, over the 4 s fixture in `src/test/resources`. The Engine's own jars from `wseLibDir` are on the test runtime classpath because the tests stand in for Engine interfaces.
+
+Either way, artifacts land in `build/libs/`. Drop the resulting JAR into `<WSE>/lib/` and restart WSE.
 
 ## Releasing
 

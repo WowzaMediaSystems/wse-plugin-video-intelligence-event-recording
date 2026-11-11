@@ -2,428 +2,200 @@
 
 ## Overview
 
-The `EventRecordingPlugin` implements `IVifEventListener` to create MP4 recordings of a live stream when specific object classes are detected. It uses the WSE `StreamRecorder` API to capture video segments that include a configurable back-buffer (pre-event) and post-event duration. Webhooks are sent when recordings start and stop.
+The `EventRecordingPlugin` implements `IVifEventListener` to create one MP4 per presence event of the
+configured object classes, on a live stream and on a VOD file job alike. The listener is one class
+with one configuration; what differs per host is the backend that turns an event into a file:
+
+- **Live stream** — the WSE `StreamRecorder` API, as before: the stream's packet buffer supplies the
+  back-buffer, a scheduled stop the post-detection window, and the recorder's callbacks say when the
+  file exists and when it is complete.
+- **VOD file job** — a cut of the job's source file by media time, video and audio copied sample for
+  sample with mp4parser, issued once the event's bounds are known.
+
+The trigger is shared: `PresenceGate` turns the stream of detection responses into presence events
+on the responses' own timeline (stream timecode live, media milliseconds on a job).
 
 ## Core Behavior
 
-### Recording Lifecycle
+### Presence events
 
 ```
-Detection event (matching class) arrives
-        │
-        ▼
-  ┌─ Is a recorder already running for this stream? ──┐
-  │                                                     │
-  No                                                   Yes
-  │                                                     │
-  ▼                                                     ▼
-  Start new StreamRecorder              Extend the stop timer
-  (with backBufferTime)                 (push deadline forward)
-  Send "recording.start" webhook
-  │
-  ▼
-  ... time passes, no new matching detections ...
-  │
-  ▼
-  Stop timer fires
-  │
-  ▼
-  Stop StreamRecorder
-  Send "recording.stop" webhook
+responses (immediate) ──► PresenceGate.observe(atMs, detections)
+                              │
+                              ├─ Start(fromMs, classes, trackIds)   first matching response
+                              │
+                              └─ End(fromMs, toMs, ...)             no match for lost_object_duration_ms
+                                                                    (toMs = last match + lost_object_duration_ms),
+                                                                    or max_clip_ms reached
 ```
 
-### Key Design Decisions
+- A response **matches** when at least `min_count` detections carry one of `class_names` (`all`
+  matches every class). With `require_track`, only detections with a tracking ID count.
+- **Every response advances the clock**, empty ones included — VIF emits one per analysis cycle —
+  so a loss is noticed without a timer of the plugin's own. On a job the clock is the file's media
+  time, which is what makes the clips identical whether the file is analysed faster or slower than
+  real time; the 1.0.0 wall-clock eviction would have cut clips of the wrong length there.
+- A match inside `merge_gap_ms` after a loss **continues** the same event: the end is held back for
+  the gap and withdrawn when a match arrives.
+- A clock that jumps backwards (a timecode discontinuity) ends the open event where it was last
+  seen and starts the clock again.
+- The gate has no Wowza types and is unit-tested on its own.
 
-1. **One recorder per stream** -- Multiple simultaneous detections (different objects, different classes) share a single recording rather than spawning separate recorders. The recording covers all overlapping detection activity.
+### Recording lifecycle
 
-2. **Extend, don't restart** -- If a new detection arrives while already recording, the stop deadline is pushed forward by `post_detection_duration`. This produces one continuous file instead of many short clips.
-
-3. **Tracking-aware extension** -- While a tracked object's `trackingId` continues to appear in detection events, the recording keeps running. The stop timer only begins once the tracked object disappears from detections for a configurable duration.
-
-4. **Use `immediate` mode** -- The plugin subscribes to `immediate` events for lowest latency between detection and recording start. The `batch` and `rollup` methods are not used.
-
-## Configuration
-
-Configuration properties are defined in `src/main/js/EventRecordingPlugin.js`, which provides UI field definitions for the VIF manager web interface. At runtime, the configured values are written to the `vif_event_listeners` section of `video-intelligence.json` and passed to the plugin via the `properties` map in `onInit()`.
-
-### UI Definition (`src/main/js/EventRecordingPlugin.js`)
-
-The file registers the listener's available methods and configurable fields in `window.VIF_LISTENER_PROPERTIES['EventRecordingPlugin']`. Each field specifies a `key`, `label`, `type`, `default`, and `tooltip`.
-
-### Runtime Configuration (`video-intelligence.json`)
-
-The UI-configured values are stored in the runtime config:
-
-```json
-"vif_event_listeners": {
-  "EventRecordingPlugin": {
-    "class_name": "EventRecordingPlugin",
-    "methods": ["immediate"],
-    "properties": {
-      "class_names": ["person", "car"],
-      "back_buffer_time": 5000,
-      "post_detection_duration": 5000,
-      "lost_object_duration_ms": 3000,
-      "recording_name_template": "${SourceStreamName}_${RecordingStartTime}",
-      "record_stream_name": "",
-      "output_path": "",
-      "webhooks": true
-    }
-  }
-}
+```
+Start ──► backend.onStart          live: StreamRecorder.start(backBufferTime = back_buffer_time)
+                                   vod:  remember fromMs
+  │
+End ───► backend.onEnd             live: schedule stop at toMs + post_detection_duration
+                                   vod:  cut [fromMs − back_buffer_time, toMs + post_detection_duration]
+                                         once the job's clock passes toMs + post_detection_duration
+  │
+host shuts the listener down ──► backend.finish(reason)
+                                   live: stop the recorder now
+                                   vod:  JOB_COMPLETED: close the open event and cut everything owed,
+                                         waiting up to 60 s for the cuts; anything else: cut nothing
 ```
 
-### Properties Reference
+Key decisions carried over from 1.0.0: one recorder per stream, extend rather than restart, no
+`batch`/`rollup` (the plugin subscribes to `immediate` for the lowest latency).
 
-| Property | Type | Default | Description |
-|---|---|---|---|
-| `class_names` | string_list | `["all"]` | Object classes that trigger recording. `"all"` matches any class. |
-| `back_buffer_time` | number | `5000` | Milliseconds of video to capture before the detection event. Uses the WSE incoming stream buffer (~8s available). |
-| `post_detection_duration` | number | `5000` | Milliseconds to continue recording after the last qualifying detection. |
-| `lost_object_duration_ms` | number | `3000` | Milliseconds since an object was last seen before it is considered lost. Wall-clock based, so independent of VIF's response cadence (which interleaves empty responses, detections with no tracking ID, and detections with a confirmed tracking ID). |
-| `recording_name_template` | text | `${SourceStreamName}_${RecordingStartTime}` | File naming template. Standard tokens: `${SourceStreamName}`, `${BaseFileName}`, `${RecordingStartTime}`, `${SegmentNumber}`, `${SegmentTime}`. Custom tokens: `${ClassNames}`, `${TrackingIds}`. |
-| `record_stream_name` | text | (empty) | Regex pattern to match the stream name to record. Empty records the source stream. To record the VIF transcoder output (with overlays), use `.*-vi$`. The pattern is matched against published streams in the application; the first match is used. |
-| `output_path` | text | (empty) | Directory for recorded files. Empty uses the WSE application default. |
-| `webhooks` | boolean | `true` | Send webhooks on recording start/stop. |
+## Host selection
+
+`requires()` returns the empty set, so the controller initialises the listener on any host. `onInit`
+picks the backend from what it is handed:
+
+| Host | What `onInit` sees | Backend |
+|---|---|---|
+| VOD job | `job_id` and `source_file` in the properties, a stream stub that answers only `getName()`, no application instance | `VodClipBackend` |
+| Live stream | an `IMediaStream` and an `IApplicationInstance` | `LiveRecorderBackend` |
+| Neither | | one WARN; the listener is inert |
+
+On a job, `ModuleVideoIntelligence.getModule(...)` is never called (there is no application
+instance) and `record_stream_name` is ignored with one INFO line.
 
 ## Implementation Details
 
-### Class: `EventRecordingPlugin`
+### Package layout
 
-```
-EventRecordingPlugin implements IVifEventListener, IStreamRecorderActionNotify
-```
+- `com.wowza.wms.plugin.videointelligence.event.EventRecordingPlugin` — the listener (the class the
+  controller resolves by its short name) and `EventRecordingFileVersionDelegate`, the live file
+  namer. Both keep their 1.0.0 names.
+- `com.wowza.wms.plugin.videointelligence.eventrecording` — `PresenceGate`, `RecordingBackend`,
+  `LiveRecorderBackend`, `VodClipBackend`, `RecordingNames`. A sub-namespace of the controller's,
+  so a future controller class of the same simple name cannot shadow the plugin's.
+- `com.wowza.wms.plugin.videointelligence.eventrecording.clip` — `Mp4FileClipper`, `IsoBoxMapping`.
 
-#### State
+### `EventRecordingPlugin`
 
-```java
-// Configuration (set in onInit)
-private Set<String> classNames;
-private long backBufferTime;
-private long postDetectionDuration;
-private long lostObjectDurationMs;    // wall-clock ms; an object is considered lost if not seen in this long
-private String recordingNameTemplate;
-private Pattern recordStreamNamePattern;  // null = record source stream
-private String outputPath;
-private boolean webhooksEnabled;
+- `onInit` parses the properties (1.0.0 names unchanged; `min_count`, `require_track`,
+  `merge_gap_ms`, `max_clip_ms` added), builds the gate and the backend, and resolves the Engine's
+  `WebhookListener` when `webhooks` is on.
+- `immediate` takes the response's `detectionWindow.fromTimeCode` as the clock, maps the detections
+  to what the gate needs (class, tracking ID), feeds the gate under a lock and hands each transition
+  to the backend, then `onClock`. Live, it also maintains the per-track table behind the
+  `detection.start`/`detection.stop` webhooks, evicted on the same media clock.
+- `onShutdown(ShutdownEvent)` closes the gate on `JOB_COMPLETED`, lets the backend finish, and shuts
+  the executor down — waiting for the owed cuts on a completed job, abandoning them otherwise.
+- As the backends' `Reporter` it logs every file and sends the webhooks.
 
-// Runtime state
-private IStreamRecorder activeRecorder;        // null when not recording
-private Timer stopTimer;                        // schedules delayed stop
-private Map<Integer, ObjectInfo> activeObjects;  // trackingId -> last-seen info about the object
-```
+**Threading.** The controller invokes listeners on the thread that paces the frame/response cycle
+(live) or the job's pump (VOD). Recorder calls block and a cut of a long event is seconds of IO, so
+both backends run their side effects on the listener's single-thread executor. The gate and the
+backend state are guarded by one lock.
 
-#### Lifecycle
+### `LiveRecorderBackend`
 
-**`onInit(appInstance, stream, methods, properties)`**
-- Parse all configuration properties from the `properties` map
-- Store `appInstance`, `stream`, and connection metadata (`vHostName`, `appName`, etc.)
-- Obtain `WebhookListener` from `Server.getInstance().getProperties()` if webhooks enabled
+The 1.0.0 recorder code, with two changes:
 
-**`onShutdown()`**
-- If a recorder is active, stop and remove it via `LiveStreamRecordManager.stopRecording()`
-- Cancel any pending stop timer
+- **Start race closed.** `LiveStreamRecordManager.startRecording()` is asynchronous and
+  `activeRecorder` is only known from `onStartRecorder`; 1.0.0 could ask for a second recorder from
+  the next response. A `starting` flag set synchronously in `onStart` keeps the second request out.
+- **Stop by the clock.** The post-detection stop is scheduled from the gate's `End` (`toMs +
+  post_detection_duration − now`, on the stream's timeline) instead of from a wall-clock eviction;
+  a new `Start` cancels it.
 
-#### Event Processing
+The keyframe walk that computes the first-frame wall clock for `${RecordingStartTime}` is
+unchanged (`getLastKeyFrame`, `getPlayPackets`, back to `backBufferTime` before the latest
+keyframe), and so are the recorder parameters (`FORMAT_MP4`, `startOnKeyFrame`, `SEGMENT_NONE`,
+the file version delegate). `onSegmentStart` is where the file is known (`getFilePath()`), and
+what the reporter is told; `onStopRecorder` reports the finished file.
 
-**`immediate(DetectionResponse response)`**
+Limits inherited: the back-buffer is bounded by the Engine's live packet buffer (~8 s) and starts
+on a keyframe; a stream younger than `back_buffer_time` records from its start.
 
-The VIF framework filters detections by `confidence_threshold` before delivering them to the listener, so this method only needs to filter by `class_names`. Each detection that passes the filter is stored in `activeObjects`, keyed by its tracking ID, with its `className`, last-observed `confidence`, the stream-relative timecode (`lastSeenTC` = `response.detectionWindow.fromTimeCode`), and the wall-clock time (`lastSeenAtMs` = `System.currentTimeMillis()`).
+### `VodClipBackend`
 
-VIF emits a mixed stream of detection responses: responses with a confirmed tracking ID, responses where the tracking ID is `null` (detected but no tracking ID assigned yet), and outright empty responses. The eviction logic does **not** key off the response cadence — it uses wall-clock elapsed time, so noisy "non-confirming" responses neither advance nor suppress the eviction clock.
+- `onEnd` queues a cut owed at `toMs + post_detection_duration`; `onClock` issues every cut whose
+  time has come. Nothing is cut while an event is open, so the clip is written once, with exact
+  bounds.
+- `finish(JOB_COMPLETED)` issues what is still owed; `finish(JOB_FAILED | JOB_CANCELLED |
+  LISTENER_DISABLED)` drops it with one INFO line.
+- Output directory: `output_path`, else the source file's directory. The name comes from the same
+  template, `${RecordingStartTime}` rendered as the clip's media offset `HH.mm.ss.SSS` and
+  `${SourceStreamName}` as the source file's name without extension; a taken name gets `_1`, `_2`.
+- `max_clip_ms` caps an event that never closes: the gate ends it at `fromMs + max_clip_ms` and
+  starts the next one.
 
-```
-nowMs = System.currentTimeMillis()
-detectionTC = response.detectionWindow.fromTimeCode
+Why a deferred cut rather than writing as the job advances: an MP4 written incrementally has no
+`moov` until the end and needs a second pass anyway; the source is on disk, and cutting once with
+exact bounds costs only that the clip arrives at `to + post_detection_duration` instead of at `to`.
 
-1. Build a `qualified` list: detections with non-null tracking ID and matching class_names
-2. For each qualified detection:
-     - Update/insert in activeObjects (set className, lastConfidence, lastSeenTC, lastSeenAtMs = nowMs)
-     - Remember which tracking IDs are new
-3. Eviction (regardless of whether qualified is empty):
-     - For each entry in activeObjects where (nowMs - lastSeenAtMs) > lostObjectDurationMs:
-       capture ObjectInfo, evict, fire detection.stop
-4. If qualified non-empty:
-     - If recorder is NOT running -> startRecording() (async; recording context populated by onSegmentStart)
-     - Else -> cancel pending stop timer (extend recording)
-     - For each new tracking ID, fire detection.start webhook
-5. If activeObjects is now empty and recorder is running, scheduleStop()
-6. Return !qualified.isEmpty()
-```
+### `Mp4FileClipper`
 
-**`batch(...)` / `rollup(...)`** -- Return `false` (unused).
+mp4parser (`Movie` → `ClippedTrack` per `vide`/`soun` track → `DefaultMp4Builder`): the cut starts
+on the video sync sample at or before the requested start, so a clip may begin up to one GOP early
+and never late, and ends at the first sample at or after the requested end, or at the file's end.
+Other tracks (timecode, data) are dropped. No decoding, any codec the container carries.
 
-#### Stream Name Resolution
+**Box mapping inside the Engine.** mp4parser loads its box-type mapping
+(`isoparser2-default.properties`) through the JVM's system classloader, which cannot see the
+Engine's `lib/` jars: the lookup returns null and the parser dies in `Properties.load` with
+"inStream parameter is null" before touching the file. `IsoBoxMapping.ensure()` fills the parser's
+cache from the plugin's own classloader, which sits next to `isoparser`, before any file is opened.
+Unit tests never need it; there mp4parser is on the system classpath.
 
-The stream to record is determined by `record_stream_name`:
+### Webhook payloads
 
-- **Empty (default):** Record the source stream (`this.streamName`).
-- **Regex pattern:** Match against published stream names in the application. The first matching stream is recorded. For example, `.*-vi$` matches the VIF transcoder output stream (e.g., `myStream-vi`), which includes overlays.
+Uses the Engine's webhook framework (`WebhookListener`), event name `video.intelligence.detection`,
+data under `event_recording_data`. A job has no stream context: the context is built with the
+default vhost, the `vod` application and `_definst_`, and every payload carries `job_id` and
+`source_file`.
 
-**Transcoder dependency:** The transcoder output stream only exists when the VIF is configured with `use_transcoder: true` for the stream. If `use_transcoder` is `false`, no `-vi` stream is produced and `record_stream_name` cannot match it.
+**Live** — unchanged from 1.0.0: `detection.start` when a tracked object of the classes first appears
+in the event (including the one that started the recording), `detection.stop` when it has not been
+seen for `lost_object_duration_ms`; queued until the segment file is open so they carry the
+`recording` block (`file`, `started_at`). WSE's own `recording.started`/`recording.stopped` cover the
+file itself.
 
-To handle this gracefully, the plugin queries the per-stream `useTranscoder` setting at `onInit()` via:
+**VOD** — one pair per clip, sent when the clip is written (the file does not exist earlier):
 
-```java
-ModuleVideoIntelligence vifModule = ModuleVideoIntelligence.getModule(
-    vHostName, appName, appInstanceName);
-if (vifModule != null) {
-    IVifService vifService = vifModule.getVifService(streamName);
-    if (vifService != null) {
-        boolean useTranscoder = vifService.getDetectorInfo().useTranscoder;
-    }
-}
-```
-
-If `record_stream_name` is set but `useTranscoder` is `false`, the plugin ignores the pattern, logs a warning, and records the source stream instead.
-
-At recording time, `resolveRecordStreamName()` iterates the application's published streams (`appInstance.getPublishStreamNames()`) and returns the first stream name matching the regex. If no match (e.g., transcoder hasn't started yet), it falls back to the source stream with a warning.
-
-#### Recording Start
-
-`startRecording()`:
-1. Computes `recordingStartMs` and `earliestKeyTC` via the keyframe-walk algorithm (see below).
-2. Resolves the target stream name via `resolveRecordStreamName()`.
-3. Builds `StreamRecorderParameters`, passing `recordingStartMs` into `EventRecordingFileVersionDelegate` so the `${RecordingStartTime}` token reflects the actual first-frame wall clock.
-4. Calls `LiveStreamRecordManager.startRecording()`. WSE emits a `recording.started` webhook automatically.
-
-```java
-computeRecordingStart();             // sets recordingStartMs and earliestKeyTC
-String targetStream = resolveRecordStreamName();
-
-StreamRecorderParameters params = new StreamRecorderParameters(appInstance);
-params.fileFormat = IStreamRecorderConstants.FORMAT_MP4;
-params.backBufferTime = this.backBufferTime;
-params.startOnKeyFrame = true;
-params.recordData = true;
-params.fileTemplate = this.recordingNameTemplate;
-params.segmentationType = IStreamRecorderConstants.SEGMENT_NONE;
-params.notifyListener = this;
-params.fileVersionDelegate = new EventRecordingFileVersionDelegate(
-        trackingIds, classNamesSnapshot, recordingStartMs);
-
-if (this.outputPath != null)
-    params.outputPath = this.outputPath;
-
-appInstance.getVHost().getLiveStreamRecordManager()
-    .startRecording(appInstance, targetStream, params);
-```
-
-#### Computing the recording start time
-
-The recorder's own `getStartTime()` is just `DateTime.now()` from when the start command was processed -- it does not account for the back buffer. The configured `backBufferTime` is a **maximum** lookback window; the actual first frame is the earliest **video keyframe** within that window, since the recorder requires a keyframe to begin writing.
-
-The plugin replicates the recorder's logic to determine the true first-frame wall clock. `IMediaStream` exposes the two anchor packets directly (`getLastPacket()` and `getLastKeyFrame()`), so we only walk `getPlayPackets()` when there could be an earlier keyframe within the window:
-
-```java
-AMFPacket lastKey = stream.getLastKeyFrame();
-AMFPacket lastPacket = stream.getLastPacket();
-if (lastKey != null && lastPacket != null) {
-    long firstKeyTC = lastKey.getAbsTimecode();
-    long lastTC = lastPacket.getAbsTimecode();
-    long targetTC = firstKeyTC - backBufferTime;
-    earliestKeyTC = firstKeyTC;
-
-    if (backBufferTime > 0) {
-        for (int i = packets.size() - 1; i >= 0; i--) {
-            AMFPacket p = packets.get(i);
-            long tc = p.getAbsTimecode();
-            if (tc >= firstKeyTC) continue;
-            if (tc < targetTC) break;
-            if (p.isVideo() && FLVUtils.isVideoKeyFrame(p))
-                earliestKeyTC = tc;
-        }
-    }
-    offsetMs = lastTC - earliestKeyTC;
-}
-recordingStartMs = System.currentTimeMillis() - offsetMs;
-```
-
-`recordingStartMs` is used:
-- Directly by `EventRecordingFileVersionDelegate` to expand `${RecordingStartTime}`.
-- Formatted as ISO-8601 in the `recording.started_at` field of detection webhooks.
-
-`earliestKeyTC` is retained so subsequent detection webhooks can compute their `recording_offset_ms` (= `detectionTC - earliestKeyTC`).
-
-#### Stop Timer
-
-When the last tracked object is lost and no new qualifying detections arrive:
-
-```java
-stopTimer = new Timer();
-stopTimer.schedule(new TimerTask() {
-    public void run() {
-        if (activeRecorder != null) {
-            // Use the manager's stopRecording to both stop AND remove the recorder.
-            // Calling activeRecorder.stopRecorder() directly leaves the recorder
-            // registered in the manager, causing it to auto-restart on stream republish.
-            appInstance.getVHost().getLiveStreamRecordManager()
-                .stopRecording(appInstance, recordingStreamName);
-        }
-    }
-}, postDetectionDuration);
-```
-
-If a new detection arrives before the timer fires, the timer is cancelled and recording continues.
-
-#### IStreamRecorderActionNotify Callbacks
-
-The plugin no longer emits its own recording start/stop webhooks -- WSE's built-in webhook framework already fires `recording.started`, `recording.stopped`, `recording.failed`, `recording.segment.started`, and `recording.segment.ended` automatically. Consumers correlate WSE recording events with the plugin's `detection.*` events via stream name and recording file path.
-
-**`onStartRecorder(IStreamRecorder recorder)`**
-- Set `activeRecorder = recorder`. The recorder may still be in WAITING state (waiting for a keyframe); the actual file may not yet exist. Detection webhooks are NOT flushed here.
-- Log
-
-**`onSegmentStart(IStreamRecorder recorder)`**
-- Set `recordingActive = true`. At this point the segment file is open for writing and `getFilePath()` returns the path being written (see `LiveStreamRecorderMP4` line 213: `notifySegmentStart(this)` is fired right after `WowzaRandomAccessFile` is opened on the target path). The plugin reads `activeRecorder.getFilePath()` for the `recording.file` webhook field -- not `getCurrentFile()`, which returns null until later in the recorder lifecycle.
-- Flush any queued `pendingDetectionEvents` -- they now carry the correct `recording.file` and `recording.started_at`.
-
-**`onSegmentEnd(IStreamRecorder recorder)`**
-- Set `recordingActive = false`.
-
-**`onStopRecorder(IStreamRecorder recorder)`**
-- Log file/duration/size
-- Clear runtime state: `activeRecorder`, `recordingActive`, `recordingStreamName`, `recordingStartMs`, `earliestKeyTC`, `activeObjects`, `pendingDetectionEvents`, `stopTimer`
-
-**`onRecorderError(IStreamRecorder recorder)`**
-- Log
-- Clear `pendingDetectionEvents` (so a failed start doesn't leak queued events)
-
-Other callbacks (`onCreateRecorder`, `onSplitRecorder`, `onSwitchRecorder`) -- log only.
-
-#### Detection webhook timing
-
-`LiveStreamRecordManager.startRecording()` is **asynchronous** -- the actual recorder start is queued on `vhost.getHandlerThreadPool()` and runs on a worker thread. This means after `startRecording()` returns, `activeRecorder` is still null and no file path is available. If we fired `detection.start` webhooks at that point, they would lack the recording context.
-
-To avoid this, detection webhooks go through `enqueueOrSendDetectionWebhook()`:
-- If `recordingActive` is true (segment file is open), send the webhook immediately.
-- Otherwise, snapshot the values (`PendingDetection`) and add to `pendingDetectionEvents`. The queue is flushed in `onSegmentStart`.
-
-This ensures every detection webhook carries the correct `recording.file` and `recording.started_at`, even for the first tracked object that triggers the recording.
-
-### Webhook Payloads
-
-Uses the existing WSE webhook infrastructure, following the same pattern as `ObjectTracking.sendWebhook()`.
-
-**Event name:** `WebhookEventName.VI_DETECTION` (`"video.intelligence.detection"`)
-
-The plugin emits two webhook actions: `detection.start` when a new tracked object first qualifies (including the first tracked object that causes the recording to begin), and `detection.stop` when a tracked object has not been seen for `lost_object_duration_ms` of wall-clock time (including the last tracked object whose loss leads to recording stop). The recording start and stop are NOT emitted by this plugin -- WSE's built-in `recording.started` / `recording.stopped` webhooks cover those events.
-
-The payload does not include its own timestamp -- WSE's `WebhookEvent` framework sets a top-level timestamp on the outer event automatically.
-
-**Detection Start:**
 ```json
-{
-  "event_recording_data": {
-    "action": "detection.start",
-    "stream_name": "myStream",
-    "detection": {
-      "tracking_id": 7,
-      "class_name": "person",
-      "confidence": 0.81,
-      "recording_offset_ms": 4870
-    },
-    "active_object_count": 3,
-    "recording": {
-      "file": "/path/to/myStream_2026-05-08-12.00.00.000-UTC.mp4",
-      "started_at": "2026-05-08T12:00:00Z"
-    }
-  }
-}
+{ "event_recording_data": { "action": "recording.started", "stream_name": "vod-<job>",
+    "job_id": "...", "source_file": "/usr/local/WowzaStreamingEngine/content/race1.mp4",
+    "class_names": ["person"], "tracking_ids": [7],
+    "recording": { "file": "/usr/local/WowzaStreamingEngine/content/race1_00.03.39.800.mp4", "from_ms": 219800 } } }
+{ "event_recording_data": { "action": "recording.stopped", "stream_name": "vod-<job>",
+    "job_id": "...", "source_file": "...", "to_ms": 233000, "size_bytes": 2012929,
+    "recording": { "file": "...", "from_ms": 219800 } } }
 ```
 
-**Detection Stop:**
-```json
-{
-  "event_recording_data": {
-    "action": "detection.stop",
-    "stream_name": "myStream",
-    "detection": {
-      "tracking_id": 5,
-      "class_name": "car",
-      "confidence": 0.92,
-      "recording_offset_ms": 9540
-    },
-    "active_object_count": 0,
-    "recording": {
-      "file": "/path/to/myStream_2026-05-08-12.00.00.000-UTC.mp4",
-      "started_at": "2026-05-08T12:00:00Z"
-    }
-  }
-}
-```
+### `EventRecordingFileVersionDelegate`
 
-- `detection.confidence` for `detection.stop` is the LAST observed confidence before the object was lost.
-- `detection.recording_offset_ms` is the offset of the event within the recording (0-based), computed as `detectionTC - earliestKeyTC`. For `detection.stop` it uses the `lastSeenTC` from the stored `ObjectInfo`.
-- `active_object_count` reflects the size of `activeObjects` AFTER the change is applied.
-- `recording.started_at` is the wall-clock time of the first frame in the recording, computed via the keyframe-walk algorithm (see "Computing the recording start time"). It matches the `${RecordingStartTime}` token in the recording file name.
-- The `recording` block is omitted if no recorder is active or `getFilePath()` is not yet populated.
-
-### Sending Webhooks
-
-```java
-private void sendWebhook(Map<String, Object> payload) {
-    if (webhookListener == null) return;
-    try {
-        Map<String, Object> data = new HashMap<>();
-        data.put("event_recording_data", payload);
-
-        WebhookEvent event = new WebhookEvent(WebhookEventName.VI_DETECTION);
-        event.setContext(WebhookEventContext.forEntity(
-            vHostName, appName, appInstanceName, streamName,
-            WebhookEventEntity.OBJECTS
-        ));
-        event.setData(data);
-        webhookListener.addEvent(event);
-    } catch (Exception e) {
-        logger.error(logPrefix + "Webhook Error: " + e.getMessage(), e);
-    }
-}
-```
-
-### EventRecordingFileVersionDelegate
-
-Custom file version delegate that extends `StreamRecorderFileVersionDelegate` to add detection-specific template tokens.
-
-```
-EventRecordingFileVersionDelegate extends StreamRecorderFileVersionDelegate
-```
-
-**File:** `src/main/java/com/wowza/wms/plugin/videointelligence/event/EventRecordingFileVersionDelegate.java`
-
-Since we use `SEGMENT_NONE`, the base class's `createFileName` skips template replacement and returns the original base file path unchanged. This delegate must handle all token replacement itself, including both the standard tokens and our custom ones.
-
-**All available tokens:**
-
-| Token | Example | Description |
-|---|---|---|
-| `${SourceStreamName}` | `myStream` | Stream name (standard) |
-| `${BaseFileName}` | `myStream` | Base filename before versioning (standard) |
-| `${RecordingStartTime}` | `2026-05-01-12.00.00.000-UTC` | Recording start time (standard) |
-| `${SegmentNumber}` | `0` | Segment number (standard) |
-| `${SegmentTime}` | `2026-05-01-12.00.00.000-UTC` | Segment creation time (standard) |
-| `${ClassNames}` | `person_car` | Underscore-joined detected class names that triggered the recording |
-| `${TrackingIds}` | `2_5` | Underscore-joined tracking IDs active when recording started |
-
-The delegate is instantiated at recording start and receives a snapshot of the active tracking IDs and detected class names at that point.
-
-## File Structure
-
-```
-src/main/java/com/wowza/wms/plugin/videointelligence/event/
-    EventRecordingPlugin.java                # IVifEventListener + IStreamRecorderActionNotify
-    EventRecordingFileVersionDelegate.java   # Custom file naming with detection tokens
-src/main/js/
-    EventRecordingPlugin.js                  # VIF Manager UI listener properties
-```
+As in 1.0.0: with `SEGMENT_NONE` the base delegate returns the base file path untouched, so every
+token is expanded here, `${RecordingStartTime}` from the first-frame wall clock computed by the
+keyframe walk. The token vocabulary is `RecordingNames`, shared with the VOD naming.
 
 ## Edge Cases
 
 | Scenario | Behavior |
 |---|---|
-| Stream unpublishes while recording | WSE stops the recorder automatically; `onStopRecorder` fires and sends webhook |
-| Detection flickers (object disappears for a fraction of a second, or VIF emits an empty response or one with no tracking ID) | `lost_object_duration_ms` provides hysteresis -- the object must not be seen for the full configured wall-clock duration before it is considered lost |
-| Many objects detected simultaneously | All share one recording; `activeObjects` holds all of them; recording continues until ALL are lost + post-detection timer |
-| Back buffer exceeds available buffer | WSE caps at what's available in the stream buffer (~8s); no error |
-| Recorder already exists for stream | Reuse / extend rather than create a second recorder |
-| `onShutdown` called during active recording | Stop recorder, cancel timer, send stop webhook |
+| Stream unpublishes while recording | WSE stops the recorder; `onStopRecorder` reports the file |
+| Detection flickers (empty response, or one with no tracking ID) | `lost_object_duration_ms` is the hysteresis, on the media clock, so the mix of response shapes neither advances nor suppresses it |
+| Many objects at once | One event, one file, until all are absent for `lost_object_duration_ms` plus the post-detection window |
+| Back-buffer exceeds the live buffer | WSE caps at what the buffer holds (~8 s), from the earliest keyframe inside it |
+| Job stops before the event closes | `JOB_COMPLETED`: the event ends `lost_object_duration_ms` after its last match and is cut; failed/cancelled: nothing is written |
+| Job resumed after an interruption | The listener is re-created; an event that straddled the interruption yields two clips |
+| Clip name already taken | `_1`, `_2` suffix, never an overwrite |
+| Event that never ends (`max_clip_ms`) | Closed at the cap, cut, and a new event opened from the next match |
+| Listener disabled live with a recorder running | The recorder is stopped on the way out — left registered, the manager would restart it on the next publish |
