@@ -4,12 +4,15 @@
  */
 package com.wowza.wms.plugin.videointelligence.eventrecording;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 /**
@@ -31,18 +34,19 @@ public final class RecordingNames
 	public static final String DEFAULT_TEMPLATE = STREAM_NAME_TAG + "_" + START_TIME_TAG;
 	private static final String DATETIME_FORMAT = "yyyy-MM-dd-HH.mm.ss.SSS-z";
 	private static final String EXTENSION = ".mp4";
+	private static final Object PUBLISH_LOCK = new Object();
+	private static final AtomicLong PART_SEQUENCE = new AtomicLong();
 
 	private RecordingNames()
 	{
 	}
 
 	/**
-	 * The clip's file under {@code directory} for an event starting at media offset
-	 * {@code fromMs} of {@code sourceName}: the template rendered, with a {@code _1}, {@code _2}
-	 * suffix when the name is already taken, so a clip never overwrites another.
+	 * The clip's name, without extension, for an event starting at media offset {@code fromMs}
+	 * of {@code sourceName}: the template rendered.
 	 */
-	public static Path clipFile(Path directory, String template, String sourceName, long fromMs,
-			Set<String> classNames, Set<Integer> trackIds)
+	public static String clipName(String template, String sourceName, long fromMs, Set<String> classNames,
+			Set<Integer> trackIds)
 	{
 		String name = withoutExtension(template == null || template.isBlank() ? DEFAULT_TEMPLATE : template);
 		name = name.replace(STREAM_NAME_TAG, sourceName);
@@ -54,8 +58,34 @@ public final class RecordingNames
 		name = name.replace(CLASS_NAMES_TAG, sanitize(String.join("_", classNames)));
 		name = name.replace(TRACKING_IDS_TAG,
 				sanitize(trackIds.stream().map(String::valueOf).collect(Collectors.joining("_"))));
-		name = sanitize(name);
-		return unclaimed(directory, name);
+		return sanitize(name);
+	}
+
+	/**
+	 * Where a clip is written before it is complete: a sibling no listing takes for a clip. Only
+	 * named here — the writer creates it, so the clip keeps ordinary file permissions.
+	 */
+	public static Path partFile(Path directory, String name)
+	{
+		return directory.resolve("." + name + "-" + PART_SEQUENCE.incrementAndGet() + "-" + System.nanoTime()
+				+ EXTENSION + ".part");
+	}
+
+	/**
+	 * Gives the finished {@code part} its name under {@code directory}, with a {@code _1},
+	 * {@code _2} suffix when the name is already taken. One clip at a time across the Engine, so
+	 * two jobs cutting the same source cannot be handed the same name; the file appears under
+	 * it whole.
+	 */
+	public static Path publish(Path part, Path directory, String name) throws IOException
+	{
+		synchronized (PUBLISH_LOCK)
+		{
+			Path candidate = directory.resolve(name + EXTENSION);
+			for (int version = 1; Files.exists(candidate); version++)
+				candidate = directory.resolve(name + "_" + version + EXTENSION);
+			return Files.move(part, candidate, StandardCopyOption.ATOMIC_MOVE);
+		}
 	}
 
 	/** {@code HH.mm.ss.SSS} of a media offset — sortable, and legal in a file name. */
@@ -83,13 +113,5 @@ public final class RecordingNames
 		if (extension.equalsIgnoreCase(".mp4") || extension.equalsIgnoreCase(".flv"))
 			return template.substring(0, dot);
 		return template;
-	}
-
-	private static Path unclaimed(Path directory, String name)
-	{
-		Path candidate = directory.resolve(name + EXTENSION);
-		for (int version = 1; Files.exists(candidate); version++)
-			candidate = directory.resolve(name + "_" + version + EXTENSION);
-		return candidate;
 	}
 }

@@ -24,8 +24,8 @@ public interface RecordingBackend
 	void onClock(long nowMs);
 
 	/**
-	 * The host is done with the listener. A job that completed is given the time to write what
-	 * it still owes; anything else drops it.
+	 * The host is done with the listener. A job that ended, however it ended, still writes what
+	 * it owes; a listener torn down early drops it.
 	 */
 	void finish(ShutdownEvent.Reason reason);
 

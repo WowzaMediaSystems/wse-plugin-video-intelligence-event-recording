@@ -186,7 +186,8 @@ public final class PresenceGate
 
 	/**
 	 * The presence that began at {@code fromMs} is over: nothing matched since
-	 * {@code toMs - lostMs}, or the event reached {@code maxClipMs}.
+	 * {@code toMs - lostMs}, or the event reached {@code maxClipMs} — {@code capped}, which is
+	 * the one end a backend may not hold open for the event that follows it.
 	 */
 	public static final class End implements Transition
 	{
@@ -194,13 +195,20 @@ public final class PresenceGate
 		private final long toMs;
 		private final Set<String> classes;
 		private final Set<Integer> trackIds;
+		private final boolean capped;
 
 		public End(long fromMs, long toMs, Set<String> classes, Set<Integer> trackIds)
+		{
+			this(fromMs, toMs, classes, trackIds, false);
+		}
+
+		public End(long fromMs, long toMs, Set<String> classes, Set<Integer> trackIds, boolean capped)
 		{
 			this.fromMs = fromMs;
 			this.toMs = toMs;
 			this.classes = classes;
 			this.trackIds = trackIds;
+			this.capped = capped;
 		}
 
 		public long fromMs()
@@ -223,26 +231,31 @@ public final class PresenceGate
 			return trackIds;
 		}
 
+		public boolean capped()
+		{
+			return capped;
+		}
+
 		@Override
 		public boolean equals(Object other)
 		{
 			if (!(other instanceof End))
 				return false;
 			End that = (End)other;
-			return fromMs == that.fromMs && toMs == that.toMs && classes.equals(that.classes)
-					&& trackIds.equals(that.trackIds);
+			return fromMs == that.fromMs && toMs == that.toMs && capped == that.capped
+					&& classes.equals(that.classes) && trackIds.equals(that.trackIds);
 		}
 
 		@Override
 		public int hashCode()
 		{
-			return Objects.hash(fromMs, toMs, classes, trackIds);
+			return Objects.hash(fromMs, toMs, classes, trackIds, capped);
 		}
 
 		@Override
 		public String toString()
 		{
-			return "End[" + fromMs + "-" + toMs + "ms " + classes + " " + trackIds + "]";
+			return "End[" + fromMs + "-" + toMs + "ms " + classes + " " + trackIds + (capped ? " capped" : "") + "]";
 		}
 	}
 
@@ -265,41 +278,56 @@ public final class PresenceGate
 		return active;
 	}
 
+	/** Whether the last observation matched: the open event was seen in it. */
+	public boolean matchedLast()
+	{
+		return active && lastMatchMs == lastObservedMs;
+	}
+
+	/** The open event as it stands — where it began and what it has seen so far — or null. */
+	public Start open()
+	{
+		return active ? new Start(fromMs, snapshot(classes), snapshot(trackIds)) : null;
+	}
+
 	/**
 	 * Feeds one response. {@code atMs} is the response's position on the timeline; a position
 	 * behind the last one is a discontinuity, which ends the open event where it was last seen
 	 * and starts the clock again.
+	 *
+	 * <p>The loss is judged against the last match, not the last response: a host that withholds
+	 * empty responses, or answers sparsely, still gets two events out of two presences.
 	 */
 	public List<Transition> observe(long atMs, List<Seen> detections)
 	{
 		List<Transition> transitions = new ArrayList<>(2);
-		if (lastObservedMs != Long.MIN_VALUE && atMs < lastObservedMs)
-		{
-			if (active)
-				transitions.add(end(lastMatchMs));
-		}
+		if (active && lastObservedMs != Long.MIN_VALUE && atMs < lastObservedMs)
+			transitions.add(end(lastMatchMs, false));
 		lastObservedMs = atMs;
 
-		boolean matched = countMatching(detections) >= settings.minCount();
-		if (active && settings.maxClipMs() != null && atMs - fromMs >= settings.maxClipMs())
-			transitions.add(end(fromMs + settings.maxClipMs()));
-		if (matched)
+		if (active)
 		{
-			boolean opened = !active;
-			if (opened)
-			{
-				active = true;
-				fromMs = atMs;
-			}
-			lastMatchMs = atMs;
-			remember(detections);
-			if (opened)
-				transitions.add(new Start(fromMs, snapshot(classes), snapshot(trackIds)));
-			return transitions;
+			boolean lost = atMs - lastMatchMs > settings.lostMs() + settings.mergeGapMs();
+			boolean capped = settings.maxClipMs() != null && atMs - fromMs >= settings.maxClipMs();
+			long lostAtMs = lastMatchMs + settings.lostMs();
+			if (capped && (!lost || fromMs + settings.maxClipMs() < lostAtMs))
+				transitions.add(end(fromMs + settings.maxClipMs(), true));
+			else if (lost)
+				transitions.add(end(lostAtMs, false));
 		}
-		// The merge gap holds the end back: a match arriving inside it continues the same event.
-		if (active && atMs - lastMatchMs > settings.lostMs() + settings.mergeGapMs())
-			transitions.add(end(lastMatchMs + settings.lostMs()));
+		if (countMatching(detections) < settings.minCount())
+			return transitions;
+
+		boolean opened = !active;
+		if (opened)
+		{
+			active = true;
+			fromMs = atMs;
+		}
+		lastMatchMs = atMs;
+		remember(detections);
+		if (opened)
+			transitions.add(new Start(fromMs, snapshot(classes), snapshot(trackIds)));
 		return transitions;
 	}
 
@@ -308,12 +336,12 @@ public final class PresenceGate
 	{
 		if (!active)
 			return List.of();
-		return List.of(end(lastMatchMs + settings.lostMs()));
+		return List.of(end(lastMatchMs + settings.lostMs(), false));
 	}
 
-	private End end(long toMs)
+	private End end(long toMs, boolean capped)
 	{
-		End end = new End(fromMs, Math.max(fromMs, toMs), snapshot(classes), snapshot(trackIds));
+		End end = new End(fromMs, Math.max(fromMs, toMs), snapshot(classes), snapshot(trackIds), capped);
 		active = false;
 		classes.clear();
 		trackIds.clear();

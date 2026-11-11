@@ -1,6 +1,7 @@
 package com.wowza.wms.plugin.videointelligence.eventrecording.clip;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -8,6 +9,8 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+
+import java.util.stream.Stream;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -88,6 +91,31 @@ public class Mp4FileClipperTest
 		IOException refusal = assertThrows(IOException.class,
 				() -> Mp4FileClipper.clip(FIXTURE, 5000, 6000, temp.resolve("none.mp4")));
 		assertTrue(refusal.getMessage().startsWith("empty clip: 5000-6000ms"), refusal.getMessage());
+	}
+
+	private static long mediaDataCopies() throws IOException
+	{
+		try (Stream<Path> files = Files.list(Paths.get(System.getProperty("java.io.tmpdir"))))
+		{
+			return files.filter(file -> file.getFileName().toString().startsWith("MediaDataBox")).count();
+		}
+	}
+
+	@Test
+	public void aCutDoesNotCopyTheSourcesMediaDataToATempFile() throws IOException
+	{
+		long before = mediaDataCopies();
+		Mp4FileClipper.clip(FIXTURE, 0, 1000, temp.resolve("clip.mp4"));
+		assertEquals(before, mediaDataCopies());
+	}
+
+	@Test
+	public void aRefusedCutLeavesNoFileBehind() throws IOException
+	{
+		Path clip = temp.resolve("none.mp4");
+		Files.writeString(clip, "left by an earlier attempt");
+		assertThrows(IOException.class, () -> Mp4FileClipper.clip(FIXTURE, 5000, 6000, clip));
+		assertFalse(Files.exists(clip));
 	}
 
 	@Test

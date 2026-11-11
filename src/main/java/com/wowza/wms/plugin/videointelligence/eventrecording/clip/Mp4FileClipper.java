@@ -16,11 +16,14 @@ import java.util.Arrays;
 import java.util.List;
 
 import org.mp4parser.Container;
+import org.mp4parser.IsoFile;
+import org.mp4parser.boxes.iso14496.part12.MovieBox;
+import org.mp4parser.boxes.iso14496.part12.TrackBox;
 import org.mp4parser.muxer.FileRandomAccessSourceImpl;
 import org.mp4parser.muxer.Movie;
+import org.mp4parser.muxer.Mp4TrackImpl;
 import org.mp4parser.muxer.Track;
 import org.mp4parser.muxer.builder.DefaultMp4Builder;
-import org.mp4parser.muxer.container.mp4.MovieCreator;
 import org.mp4parser.muxer.tracks.ClippedTrack;
 
 /**
@@ -77,7 +80,8 @@ public final class Mp4FileClipper
 
 	/**
 	 * Writes {@code [fromMs, toMs)} of {@code source} to {@code target}. An end past the file is
-	 * the file's end; a start past it is an error, since no sample would be selected.
+	 * the file's end; a start past it is an error, since no sample would be selected. A cut that
+	 * fails leaves no file behind.
 	 */
 	public static Result clip(Path source, long fromMs, long toMs, Path target) throws IOException
 	{
@@ -86,6 +90,22 @@ public final class Mp4FileClipper
 		{
 			Movie movie = open(source, handles);
 			return write(movie, fromMs, toMs, target);
+		}
+		catch (IOException | RuntimeException | AssertionError e)
+		{
+			try
+			{
+				Files.deleteIfExists(target);
+			}
+			catch (IOException | RuntimeException deleting)
+			{
+				e.addSuppressed(deleting);
+			}
+			// mp4parser throws unchecked on a malformed sample table rather than reporting an
+			// unreadable container.
+			if (e instanceof IOException)
+				throw (IOException)e;
+			throw new IOException("could not cut " + source + ": " + e, e);
 		}
 		finally
 		{
@@ -108,18 +128,33 @@ public final class Mp4FileClipper
 	}
 
 	/**
-	 * {@code MovieCreator.build(String)} opens a {@code RandomAccessFile} it never closes; the
-	 * handles are opened here and closed by the caller once the clip is written.
+	 * The video and sound tracks of {@code file}, built as {@code MovieCreator.build} builds
+	 * them but with the {@code mdat} stepped over instead of copied to a temp file. The handle
+	 * the samples are read through is closed by the caller once the clip is written.
 	 */
 	private static Movie open(Path file, List<AutoCloseable> handles) throws IOException
 	{
 		IsoBoxMapping.ensure();
-		FileInputStream boxes = new FileInputStream(file.toFile());
-		handles.add(boxes);
 		RandomAccessFile samples = new RandomAccessFile(file.toFile(), "r");
 		handles.add(samples);
-		return MovieCreator.build(boxes.getChannel(), new FileRandomAccessSourceImpl(samples),
-				file.getFileName().toString());
+		Movie movie = new Movie();
+		try (FileInputStream boxes = new FileInputStream(file.toFile()))
+		{
+			IsoFile isoFile = new IsoFile(boxes.getChannel(), new SkippingMediaDataBoxParser(boxes.getChannel()));
+			MovieBox moov = isoFile.getMovieBox();
+			if (moov == null)
+				throw new IOException("could not read " + file + " as an MP4: no movie box");
+			FileRandomAccessSourceImpl sampleBytes = new FileRandomAccessSourceImpl(samples);
+			for (TrackBox trackBox : moov.getBoxes(TrackBox.class))
+			{
+				String handler = trackBox.getMediaBox().getHandlerBox().getHandlerType();
+				if (!"vide".equals(handler) && !"soun".equals(handler))
+					continue;
+				long trackId = trackBox.getTrackHeaderBox().getTrackId();
+				movie.addTrack(new Mp4TrackImpl(trackId, isoFile, sampleBytes, file.getFileName() + "[" + trackId + "]"));
+			}
+		}
+		return movie;
 	}
 
 	private static void closeAll(List<AutoCloseable> handles) throws IOException
@@ -163,8 +198,7 @@ public final class Mp4FileClipper
 				clipped.addTrack(new ClippedTrack(track, fromSample, toSample));
 				continue;
 			}
-			// Timecode and other data tracks carry nothing a clip needs and would keep the
-			// source's length.
+			// A second video track would not share the first one's keyframes.
 			if (!"soun".equals(track.getHandler()))
 				continue;
 			long[] starts = sampleStartsMs(track);

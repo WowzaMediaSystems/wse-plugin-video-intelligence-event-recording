@@ -20,7 +20,8 @@ import com.wowza.wms.plugin.videointelligence.eventrecording.clip.Mp4FileClipper
  * Cuts a file job's presence events out of its source. Nothing is written while an event is
  * open: the cut is issued once the job's clock has passed the event's post-roll — every later
  * response advances it — or when the job completes, so the clip has exact bounds and is written
- * once. A job that fails or is cancelled writes nothing.
+ * once, under its final name only when complete. A job that fails or is cancelled still cuts
+ * the events it had seen, since a resume continues after them.
  */
 public final class VodClipBackend implements RecordingBackend
 {
@@ -120,7 +121,10 @@ public final class VodClipBackend implements RecordingBackend
 			owed = new ArrayList<>(pending);
 			pending.clear();
 		}
-		if (reason != ShutdownEvent.Reason.JOB_COMPLETED)
+		// A listener being torn down for throwing is not trusted with more work. A job that
+		// failed or was cancelled still analysed what it owes: a resume continues after it and
+		// would never see these events again.
+		if (reason == ShutdownEvent.Reason.LISTENER_DISABLED)
 		{
 			if (!owed.isEmpty())
 				logger.info(logPrefix + "dropping " + owed.size() + " clip(s) not yet cut: " + reason);
@@ -134,18 +138,35 @@ public final class VodClipBackend implements RecordingBackend
 	{
 		long fromMs = Math.max(0, end.fromMs() - preRollMs);
 		long toMs = end.toMs() + postRollMs;
-		Path target = RecordingNames.clipFile(outputDir, nameTemplate, sourceName, fromMs, end.classes(),
-				end.trackIds());
+		String name = RecordingNames.clipName(nameTemplate, sourceName, fromMs, end.classes(), end.trackIds());
+		Path part = null;
 		try
 		{
-			Mp4FileClipper.Result written = Mp4FileClipper.clip(source, fromMs, toMs, target);
+			part = RecordingNames.partFile(outputDir, name);
+			Mp4FileClipper.Result written = Mp4FileClipper.clip(source, fromMs, toMs, part);
+			Path target = RecordingNames.publish(part, outputDir, name);
 			reporter.recordingStarted(target.toString(), written.fromMs(), null, end.classes(), end.trackIds());
 			reporter.recordingStopped(target.toString(), written.fromMs(), written.toMs(), Files.size(target));
 		}
 		catch (IOException | RuntimeException e)
 		{
-			logger.error(logPrefix + "could not cut " + fromMs + "-" + toMs + "ms of " + source + " to " + target
+			logger.error(logPrefix + "could not cut " + fromMs + "-" + toMs + "ms of " + source + " as " + name
 					+ ": " + e, e);
+			discard(part);
+		}
+	}
+
+	private void discard(Path part)
+	{
+		if (part == null)
+			return;
+		try
+		{
+			Files.deleteIfExists(part);
+		}
+		catch (IOException | RuntimeException e)
+		{
+			logger.warn(logPrefix + "could not remove " + part + ": " + e);
 		}
 	}
 

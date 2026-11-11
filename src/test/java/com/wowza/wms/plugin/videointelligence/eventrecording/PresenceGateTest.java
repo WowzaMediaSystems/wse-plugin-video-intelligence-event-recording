@@ -122,12 +122,50 @@ public class PresenceGateTest
 	{
 		PresenceGate gate = new PresenceGate(new Settings(Set.of("person"), 1, false, 3000, 0, 10_000L));
 		gate.observe(0, PERSON);
-		assertEquals(List.of(), gate.observe(9_999, PERSON));
-		assertEquals(List.of(new End(0, 10_000, Set.of("person"), Set.of(7)),
+		for (long atMs : new long[] {3000, 6000, 9000, 9_999})
+			assertEquals(List.of(), gate.observe(atMs, PERSON));
+		assertEquals(List.of(new End(0, 10_000, Set.of("person"), Set.of(7), true),
 				new Start(10_500, Set.of("person"), Set.of(7))), gate.observe(10_500, PERSON));
 		// A cap reached while nothing matches closes the event and opens nothing.
-		assertEquals(List.of(new End(10_500, 20_500, Set.of("person"), Set.of(7))), gate.observe(21_000, NOTHING));
+		for (long atMs : new long[] {13_000, 15_500, 18_000, 20_400})
+			assertEquals(List.of(), gate.observe(atMs, PERSON));
+		assertEquals(List.of(new End(10_500, 20_500, Set.of("person"), Set.of(7), true)),
+				gate.observe(20_600, NOTHING));
 		assertFalse(gate.active());
+	}
+
+	@Test
+	public void aLossOlderThanTheCapEndsTheEventWhereItWasLost()
+	{
+		PresenceGate gate = new PresenceGate(new Settings(Set.of("person"), 1, false, 3000, 0, 10_000L));
+		gate.observe(0, PERSON);
+		assertEquals(List.of(new End(0, 3000, Set.of("person"), Set.of(7))), gate.observe(21_000, NOTHING));
+		assertFalse(gate.active());
+	}
+
+	@Test
+	public void twoPresencesWithNoResponseBetweenThemAreTwoEvents()
+	{
+		PresenceGate gate = new PresenceGate(settings(3000, 0));
+		gate.observe(0, PERSON);
+		gate.observe(2000, PERSON);
+		// A host that withholds empty responses says nothing for the 28 s in between.
+		assertEquals(List.of(new End(0, 5000, Set.of("person"), Set.of(7)),
+				new Start(30_000, Set.of("person"), Set.of(7))), gate.observe(30_000, PERSON));
+		assertTrue(gate.active());
+	}
+
+	@Test
+	public void theOpenEventAndWhetherTheLastResponseMatchedCanBeAsked()
+	{
+		PresenceGate gate = new PresenceGate(settings(3000, 0));
+		assertEquals(null, gate.open());
+		assertFalse(gate.matchedLast());
+		gate.observe(1000, PERSON);
+		assertTrue(gate.matchedLast());
+		gate.observe(2000, NOTHING);
+		assertFalse(gate.matchedLast());
+		assertEquals(new Start(1000, Set.of("person"), Set.of(7)), gate.open());
 	}
 
 	@Test

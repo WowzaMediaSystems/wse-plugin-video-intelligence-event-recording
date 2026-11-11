@@ -101,8 +101,8 @@ instance) and `record_stream_name` is ignored with one INFO line.
 
 **Threading.** The controller invokes listeners on the thread that paces the frame/response cycle
 (live) or the job's pump (VOD). Recorder calls block and a cut of a long event is seconds of IO, so
-both backends run their side effects on the listener's single-thread executor. The gate and the
-backend state are guarded by one lock.
+both backends run their recorder calls and cuts on the listener's single-thread executor. The gate
+is guarded by the listener's lock, each backend's state by its own.
 
 ### `LiveRecorderBackend`
 
@@ -129,8 +129,11 @@ on a keyframe; a stream younger than `back_buffer_time` records from its start.
 - `onEnd` queues a cut owed at `toMs + post_detection_duration`; `onClock` issues every cut whose
   time has come. Nothing is cut while an event is open, so the clip is written once, with exact
   bounds.
-- `finish(JOB_COMPLETED)` issues what is still owed; `finish(JOB_FAILED | JOB_CANCELLED |
-  LISTENER_DISABLED)` drops it with one INFO line.
+- `finish` issues what is still owed when the job ended, whatever its outcome — a resume continues
+  after the analysed part and would never see those events again; `finish(LISTENER_DISABLED)` drops
+  it with one INFO line.
+- A clip is written as a hidden `.part` sibling and renamed when complete; a cut that fails or is
+  interrupted leaves nothing behind.
 - Output directory: `output_path`, else the source file's directory. The name comes from the same
   template, `${RecordingStartTime}` rendered as the clip's media offset `HH.mm.ss.SSS` and
   `${SourceStreamName}` as the source file's name without extension; a taken name gets `_1`, `_2`.
@@ -143,7 +146,9 @@ exact bounds costs only that the clip arrives at `to + post_detection_duration` 
 
 ### `Mp4FileClipper`
 
-mp4parser (`Movie` → `ClippedTrack` per `vide`/`soun` track → `DefaultMp4Builder`): the cut starts
+mp4parser (`Movie` → `ClippedTrack` per `vide`/`soun` track → `DefaultMp4Builder`), with the
+source's `mdat` stepped over at parse time — mp4parser's own box copies it to a temp file kept
+until the JVM exits, and stops short past 2 GiB: the cut starts
 on the video sync sample at or before the requested start, so a clip may begin up to one GOP early
 and never late, and ends at the first sample at or after the requested end, or at the file's end.
 Other tracks (timecode, data) are dropped. No decoding, any codec the container carries.
@@ -194,8 +199,10 @@ keyframe walk. The token vocabulary is `RecordingNames`, shared with the VOD nam
 | Detection flickers (empty response, or one with no tracking ID) | `lost_object_duration_ms` is the hysteresis, on the media clock, so the mix of response shapes neither advances nor suppresses it |
 | Many objects at once | One event, one file, until all are absent for `lost_object_duration_ms` plus the post-detection window |
 | Back-buffer exceeds the live buffer | WSE caps at what the buffer holds (~8 s), from the earliest keyframe inside it |
-| Job stops before the event closes | `JOB_COMPLETED`: the event ends `lost_object_duration_ms` after its last match and is cut; failed/cancelled: nothing is written |
+| Job stops before the event closes | The event ends `lost_object_duration_ms` after its last match and is cut, whether the job completed, failed or was cancelled |
 | Job resumed after an interruption | The listener is re-created; an event that straddled the interruption yields two clips |
 | Clip name already taken | `_1`, `_2` suffix, never an overwrite |
-| Event that never ends (`max_clip_ms`) | Closed at the cap, cut, and a new event opened from the next match |
+| Event that never ends (`max_clip_ms`) | Closed at the cap and a new event opened from the next match: a cut per event on a job; live, the recorder is stopped at the cap and started again |
+| Recorder fails to start, errors, or is stopped from outside mid-event | The open event asks for a recorder again on its next match (at most once a second after a failure) |
+| Host withholds empty responses (`suppress_empty`) or answers sparsely | The loss is judged against the last match, so two presences more than `lost_object_duration_ms` + `merge_gap_ms` apart are two events |
 | Listener disabled live with a recorder running | The recorder is stopped on the way out — left registered, the manager would restart it on the next publish |

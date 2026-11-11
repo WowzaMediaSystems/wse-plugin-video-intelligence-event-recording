@@ -67,8 +67,10 @@ public class EventRecordingPlugin implements IVifEventListener, RecordingBackend
 	static final long DEFAULT_BACK_BUFFER_MS = 5000;
 	static final long DEFAULT_POST_DETECTION_MS = 5000;
 	static final long DEFAULT_LOST_OBJECT_MS = 3000;
-	/** How long a completed job waits for the clips it still owes before giving up on them. */
+	/** How long a job that ended waits for the clips it still owes before ending ahead of them. */
 	static final long FINISH_TIMEOUT_SECONDS = 60;
+	/** Detection webhooks held for a recorder that has not opened its file yet. */
+	static final int MAX_PENDING_DETECTIONS = 256;
 
 	private static final WMSLogger logger = WMSLoggerFactory.getLogger(EventRecordingPlugin.class);
 	private static final String LOGPREFIX = "VideoIntelligenceService";
@@ -148,6 +150,21 @@ public class EventRecordingPlugin implements IVifEventListener, RecordingBackend
 	{
 		this.streamName = stream.getName();
 		this.logPrefix = LOGPREFIX + streamName + ":EventRecordingPlugin:";
+		// The host re-initialises the same instance after a config update: nothing of the run
+		// that was shut down may survive into this one.
+		synchronized (lock)
+		{
+			stopped = false;
+			lastAtMs = Long.MIN_VALUE;
+			activeObjects.clear();
+			pendingDetectionEvents.clear();
+			recordingFile = null;
+			recordingFromMs = 0;
+			recordingStartedAtMs = null;
+		}
+		this.backend = null;
+		this.live = null;
+		this.webhookListener = null;
 		this.jobId = trimmedOrNull(properties.get("job_id"));
 		this.sourceFile = trimmedOrNull(properties.get("source_file"));
 		this.fileJob = jobId != null;
@@ -267,7 +284,22 @@ public class EventRecordingPlugin implements IVifEventListener, RecordingBackend
 			}
 			backend.onClock(atMs);
 			if (live != null)
-				trackObjects(atMs, detections);
+			{
+				// An open event whose recorder is gone asks for one again on its next match.
+				if (gate.matchedLast() && live.idle())
+					live.onStart(gate.open(), atMs);
+				// Tracks are followed for the webhooks of a recording; with no event open and no
+				// recorder running there is none for them to belong to.
+				if (gate.active() || live.engaged())
+				{
+					trackObjects(atMs, detections);
+				}
+				else
+				{
+					activeObjects.clear();
+					pendingDetectionEvents.clear();
+				}
+			}
 		}
 		return !transitions.isEmpty();
 	}
@@ -296,14 +328,16 @@ public class EventRecordingPlugin implements IVifEventListener, RecordingBackend
 		if (backend == null)
 			return;
 		ShutdownEvent.Reason reason = event == null ? ShutdownEvent.Reason.LISTENER_DISABLED : event.reason();
-		boolean completed = reason == ShutdownEvent.Reason.JOB_COMPLETED;
+		boolean jobEnded = fileJob && reason != ShutdownEvent.Reason.LISTENER_DISABLED;
 		synchronized (lock)
 		{
 			if (stopped)
 				return;
 			stopped = true;
-			if (completed)
+			if (jobEnded)
 			{
+				// Failed or cancelled as much as completed: what the job analysed is cut, since a
+				// resume continues after it and would never see the open event's beginning.
 				for (PresenceGate.Transition transition : gate.close())
 				{
 					if (transition instanceof PresenceGate.End)
@@ -318,23 +352,21 @@ public class EventRecordingPlugin implements IVifEventListener, RecordingBackend
 			activeObjects.clear();
 			pendingDetectionEvents.clear();
 		}
-		executor.shutdown();
-		if (completed)
-		{
-			try
-			{
-				if (!executor.awaitTermination(FINISH_TIMEOUT_SECONDS, TimeUnit.SECONDS))
-					logger.warn(logPrefix + "Clips still being cut after " + FINISH_TIMEOUT_SECONDS
-							+ "s; the job completes without them");
-			}
-			catch (InterruptedException e)
-			{
-				Thread.currentThread().interrupt();
-			}
-		}
-		else
+		if (!jobEnded)
 		{
 			executor.shutdownNow();
+			return;
+		}
+		executor.shutdown();
+		try
+		{
+			if (!executor.awaitTermination(FINISH_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+				logger.warn(logPrefix + "Clips still being cut after " + FINISH_TIMEOUT_SECONDS
+						+ "s; the job ends ahead of them");
+		}
+		catch (InterruptedException e)
+		{
+			Thread.currentThread().interrupt();
 		}
 	}
 
@@ -470,9 +502,14 @@ public class EventRecordingPlugin implements IVifEventListener, RecordingBackend
 		PendingDetection detection = new PendingDetection(action, trackingId, className, confidence, detectionTc,
 				activeObjects.size());
 		if (recordingFile != null)
+		{
 			sendDetectionWebhook(detection);
-		else
-			pendingDetectionEvents.add(detection);
+			return;
+		}
+		// Bounded: a recorder that keeps failing to start must not grow the queue for good.
+		if (pendingDetectionEvents.size() >= MAX_PENDING_DETECTIONS)
+			pendingDetectionEvents.remove(0);
+		pendingDetectionEvents.add(detection);
 	}
 
 	private void sendDetectionWebhook(PendingDetection detection)

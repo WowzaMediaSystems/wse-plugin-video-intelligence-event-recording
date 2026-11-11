@@ -49,8 +49,13 @@ public final class LiveRecorderBackend implements RecordingBackend, IStreamRecor
 	private final String outputPath;
 	private final Pattern recordStream;
 
+	/** How long a recorder that failed to start is left alone before the event asks again. */
+	static final long START_RETRY_MS = 1000;
+
 	private final Object lock = new Object();
+	private boolean finished;
 	private boolean starting;
+	private long retryNotBeforeMs;
 	private IStreamRecorder activeRecorder;
 	private String recordingStreamName;
 	private ScheduledFuture<?> pendingStop;
@@ -79,12 +84,25 @@ public final class LiveRecorderBackend implements RecordingBackend, IStreamRecor
 		this.recordStream = recordStream;
 	}
 
-	/** Whether the segment file is open: the moment detection webhooks can name it. */
-	public boolean recording()
+	/** Whether a recorder is running or has been asked for. */
+	public boolean engaged()
 	{
 		synchronized (lock)
 		{
-			return activeRecorder != null;
+			return starting || activeRecorder != null;
+		}
+	}
+
+	/**
+	 * Whether an open event has no recorder and may ask for one: the start failed, the recorder
+	 * errored or was stopped from outside, or the event began while the previous file was
+	 * still closing.
+	 */
+	public boolean idle()
+	{
+		synchronized (lock)
+		{
+			return !starting && activeRecorder == null && System.currentTimeMillis() >= retryNotBeforeMs;
 		}
 	}
 
@@ -94,7 +112,7 @@ public final class LiveRecorderBackend implements RecordingBackend, IStreamRecor
 		synchronized (lock)
 		{
 			cancelPendingStop();
-			if (starting || activeRecorder != null)
+			if (finished || starting || activeRecorder != null)
 				return;
 			starting = true;
 			eventFromMs = start.fromMs();
@@ -113,6 +131,13 @@ public final class LiveRecorderBackend implements RecordingBackend, IStreamRecor
 			cancelPendingStop();
 			if (!starting && activeRecorder == null)
 				return;
+			if (end.capped())
+			{
+				// Not a pending stop: the event that follows must not cancel it. Its own file is
+				// asked for once this one has closed, the back buffer covering the gap.
+				executor.execute(() -> stopRecording("max_clip_ms reached"));
+				return;
+			}
 			pendingStop = executor.schedule(() -> stopRecording("post-detection window elapsed"), delayMs,
 					TimeUnit.MILLISECONDS);
 		}
@@ -128,6 +153,7 @@ public final class LiveRecorderBackend implements RecordingBackend, IStreamRecor
 	{
 		synchronized (lock)
 		{
+			finished = true;
 			cancelPendingStop();
 		}
 		// On the caller's thread: the executor is about to be shut down, and a recorder left
@@ -158,6 +184,11 @@ public final class LiveRecorderBackend implements RecordingBackend, IStreamRecor
 
 			synchronized (lock)
 			{
+				if (finished)
+				{
+					starting = false;
+					return;
+				}
 				recordingStreamName = target;
 				fileFromTc = earliestKeyTc >= 0 ? earliestKeyTc : Math.max(0, eventFromMs - preRollMs);
 			}
@@ -165,6 +196,14 @@ public final class LiveRecorderBackend implements RecordingBackend, IStreamRecor
 					+ " trackingIds:" + start.trackIds() + " backBuffer:" + preRollMs + "ms recordingStartMs:"
 					+ recordingStartMs + " earliestKeyTC:" + earliestKeyTc);
 			appInstance.getVHost().getLiveStreamRecordManager().startRecording(appInstance, target, params);
+			// finish() may have looked for a recorder to stop before this one was registered.
+			boolean abandoned;
+			synchronized (lock)
+			{
+				abandoned = finished;
+			}
+			if (abandoned)
+				stopRecording("listener shut down while the recorder was starting");
 		}
 		catch (Exception e)
 		{
@@ -173,6 +212,7 @@ public final class LiveRecorderBackend implements RecordingBackend, IStreamRecor
 			{
 				starting = false;
 				recordingStreamName = null;
+				retryNotBeforeMs = System.currentTimeMillis() + START_RETRY_MS;
 			}
 		}
 	}
@@ -344,6 +384,7 @@ public final class LiveRecorderBackend implements RecordingBackend, IStreamRecor
 			activeRecorder = null;
 			starting = false;
 			recordingStreamName = null;
+			retryNotBeforeMs = System.currentTimeMillis() + START_RETRY_MS;
 			cancelPendingStop();
 		}
 	}

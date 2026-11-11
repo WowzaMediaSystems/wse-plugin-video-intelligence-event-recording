@@ -167,16 +167,64 @@ public class EventRecordingPluginFileJobTest
 	}
 
 	@Test
-	public void aCancelledJobWritesNothing() throws IOException
+	public void aCancelledJobStillCutsWhatItSaw() throws IOException
 	{
 		Path source = sourceIn("job");
 		EventRecordingPlugin plugin = initialised(fileJobProperties(source, 0, 0, 200));
 
 		plugin.immediate(response(500, "person"));
 		plugin.immediate(response(1000, "car"));
+		plugin.immediate(response(3000, "person"));
 		plugin.onShutdown(jobEnded(ShutdownEvent.Reason.JOB_CANCELLED));
 
+		// A resume continues after 3000 and would never see either event again.
+		List<Path> clips = clipsBeside(source);
+		assertEquals(List.of("testsrc-320x240-30fps-4s_00.00.00.500_person.mp4",
+				"testsrc-320x240-30fps-4s_00.00.03.000_person.mp4"),
+				clips.stream().map(clip -> clip.getFileName().toString()).collect(Collectors.toList()));
+	}
+
+	@Test
+	public void aListenerTornDownEarlyWritesNothing() throws IOException
+	{
+		Path source = sourceIn("job");
+		EventRecordingPlugin plugin = initialised(fileJobProperties(source, 0, 0, 200));
+
+		plugin.immediate(response(500, "person"));
+		plugin.onShutdown();
+
 		assertEquals(List.of(), clipsBeside(source));
+	}
+
+	@Test
+	public void aCutThatFailsLeavesNoFileBehind() throws IOException
+	{
+		Path source = sourceIn("job");
+		EventRecordingPlugin plugin = initialised(fileJobProperties(source, 0, 0, 200));
+
+		// Past the 4 s file: the cut selects no sample and is refused.
+		plugin.immediate(response(9000, "person"));
+		plugin.onShutdown(jobEnded(ShutdownEvent.Reason.JOB_COMPLETED));
+
+		assertEquals(List.of(), clipsBeside(source));
+	}
+
+	@Test
+	public void theSameInstanceRecordsAgainAfterItIsShutDownAndInitialisedAgain() throws IOException
+	{
+		Path source = sourceIn("job");
+		HashMap<String, Object> properties = fileJobProperties(source, 0, 0, 200);
+		EventRecordingPlugin plugin = initialised(properties);
+		plugin.immediate(response(500, "person"));
+		plugin.onShutdown();
+
+		plugin.onInit(null, namedStream("vod-job-1"), Set.of("immediate"), properties);
+		assertTrue(plugin.immediate(response(1000, "person")));
+		plugin.onShutdown(jobEnded(ShutdownEvent.Reason.JOB_COMPLETED));
+
+		List<Path> clips = clipsBeside(source);
+		assertEquals(1, clips.size());
+		assertEquals("testsrc-320x240-30fps-4s_00.00.01.000_person.mp4", clips.get(0).getFileName().toString());
 	}
 
 	@Test

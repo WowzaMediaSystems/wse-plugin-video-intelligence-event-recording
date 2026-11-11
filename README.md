@@ -86,7 +86,7 @@ Over the v2 REST API the same listener is a `custom` entry of the config's `list
 | `require_track` | boolean | `false` | Count only detections that carry a tracking ID (needs tracking on the detector). Off, any detection of the classes counts. |
 | `lost_object_duration_ms` | number | `3000` | How long the classes must be absent before the event ends. Measured on the media timeline, so it is the same length of video live and on a job. |
 | `merge_gap_ms` | number | `0` | Two events closer than this become one recording. |
-| `max_clip_ms` | number | (none) | Ends an event that never stops after this long and starts the next one. |
+| `max_clip_ms` | number | (none) | Ends an event that never stops after this long and starts the next one. Live, the recorder is stopped at the cap and a new file started from the next detection. |
 | `back_buffer_time` | number | `5000` | Milliseconds of video before the first detection. Live it comes from the WSE incoming stream buffer (~8s available) and starts on a keyframe; on a job it is cut from the file and can be any length. |
 | `post_detection_duration` | number | `5000` | Milliseconds to keep recording after the event ends. |
 | `recording_name_template` | text | `${SourceStreamName}_${RecordingStartTime}` | File naming template. See [Recording File Name Tokens](#recording-file-name-tokens) below. |
@@ -117,7 +117,7 @@ A name that already exists gets a `_1`, `_2` suffix rather than overwriting the 
 A job submitted to `/v2/vif/vod/jobs` runs the listeners of the configuration it names (a stream group config, or one given inline). The plugin needs nothing beyond that:
 
 - The clip is cut from the job's source file by media time: `[first detection − back_buffer_time, last detection + lost_object_duration_ms + post_detection_duration]`, the start snapped back to the previous keyframe, clamped to the file. Video and audio are copied sample for sample.
-- Nothing is written while an event is open. The cut happens once the job has analysed past the post-detection window, or when the job completes; a job that fails or is cancelled writes nothing.
+- Nothing is written while an event is open. The cut happens once the job has analysed past the post-detection window, or when the job ends — completed, failed or cancelled alike, since a resume continues after what was analysed. A clip is written under a hidden `.part` name and takes its own name only when complete.
 - Clips land next to the source file unless `output_path` says otherwise, and are reported by a log line and, with `webhooks` on, a `recording.started` + `recording.stopped` pair carrying `job_id`, `source_file` and the file path.
 - A job resumed after an interruption re-initialises the listener; an event that straddled the interruption yields two clips.
 - Overlays are a live transcoder feature; a VOD clip is the plain source.
