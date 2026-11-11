@@ -40,11 +40,33 @@ configurations {
     testRuntimeOnly.extendsFrom(compileOnly)
 }
 
+// The VIF controller jar the listener API lives in: -PvicJar=/path/to/jar, else a jar dropped
+// in libs/, else the published artifact.
+def vicJar = project.findProperty('vicJar')
+def vicJars = fileTree(dir: 'libs', include: 'wse-plugin-video-intelligence-*.jar')
+
 dependencies {
     compileOnly 'com.wowza.wms:wms-server:4.11.0'
     compileOnly 'org.apache.logging.log4j:log4j-core:2.25.4'
-    compileOnly 'com.wowza.wms.plugin.videointelligence:wse-plugin-video-intelligence:0.15.0'
+    if (vicJar) {
+        compileOnly files(vicJar)
+    } else if (!vicJars.isEmpty()) {
+        compileOnly vicJars
+    } else {
+        compileOnly 'com.wowza.wms.plugin.videointelligence:wse-plugin-video-intelligence:1.2.0'
+    }
     compileOnly 'javax.websocket:javax.websocket-api:1.0'
+    // The controller's message classes carry Jackson annotations; without these the compiler
+    // warns about every one of them.
+    compileOnly 'com.fasterxml.jackson.core:jackson-annotations:2.17.2'
+    // The Engine ships isoparser/muxer 1.9.56 in lib/; the VOD clip cut runs on them. Tests run
+    // outside the Engine and need them for real.
+    compileOnly 'org.mp4parser:muxer:1.9.56'
+    testImplementation 'org.mp4parser:muxer:1.9.56'
+    testImplementation 'com.fasterxml.jackson.core:jackson-databind:2.17.2'
+    // The Engine interfaces the tests stand in for (IMediaStream and friends) reference types
+    // spread over the Engine's own jars, which the JVM resolves when it builds the proxy.
+    testRuntimeOnly fileTree(dir: "$wseLibDir", include: ['wms-*.jar'])
 
     testImplementation platform('org.junit:junit-bom:5.10.2')
     testImplementation 'org.junit.jupiter:junit-jupiter'
