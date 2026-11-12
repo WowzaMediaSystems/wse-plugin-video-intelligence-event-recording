@@ -4,6 +4,7 @@
  */
 package com.wowza.wms.plugin.videointelligence.eventrecording;
 
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ScheduledExecutorService;
@@ -46,8 +47,13 @@ public final class LiveRecorderBackend implements RecordingBackend, IStreamRecor
 	private final long preRollMs;
 	private final long postRollMs;
 	private final String nameTemplate;
+	private final DateTimeFormatter dateTimeFormat;
+	private final String recorderDateTimeFormat;
 	private final String outputPath;
 	private final Pattern recordStream;
+
+	/** The Engine's own StreamRecorder property for the date-time format of a recording's name. */
+	static final String RECORDER_DATE_TIME_FORMAT_PROPERTY = "streamRecorderFileVersionDateTimeFormat";
 
 	/** How long a recorder that failed to start is left alone before the event asks again. */
 	static final long START_RETRY_MS = 1000;
@@ -68,7 +74,8 @@ public final class LiveRecorderBackend implements RecordingBackend, IStreamRecor
 
 	public LiveRecorderBackend(WMSLogger logger, String logPrefix, IApplicationInstance appInstance,
 			IMediaStream stream, ScheduledExecutorService executor, Reporter reporter, long preRollMs,
-			long postRollMs, String nameTemplate, String outputPath, Pattern recordStream)
+			long postRollMs, String nameTemplate, DateTimeFormatter dateTimeFormat, String outputPath,
+			Pattern recordStream)
 	{
 		this.logger = logger;
 		this.logPrefix = logPrefix;
@@ -80,6 +87,8 @@ public final class LiveRecorderBackend implements RecordingBackend, IStreamRecor
 		this.preRollMs = preRollMs;
 		this.postRollMs = postRollMs;
 		this.nameTemplate = nameTemplate;
+		this.dateTimeFormat = dateTimeFormat;
+		this.recorderDateTimeFormat = recorderDateTimeFormat(appInstance);
 		this.outputPath = outputPath;
 		this.recordStream = recordStream;
 	}
@@ -161,6 +170,24 @@ public final class LiveRecorderBackend implements RecordingBackend, IStreamRecor
 		stopRecording("listener shutting down");
 	}
 
+	private String recorderDateTimeFormat(IApplicationInstance appInstance)
+	{
+		try
+		{
+			String format = appInstance.getStreamRecorderProperties()
+					.getPropertyStr(RECORDER_DATE_TIME_FORMAT_PROPERTY);
+			if (format != null && !format.isBlank() && RecordingNames.dateTimeFormatter(format) == null)
+				logger.warn(logPrefix + "Invalid " + RECORDER_DATE_TIME_FORMAT_PROPERTY + " '" + format + "'. Using "
+						+ RecordingNames.DEFAULT_DATE_TIME_FORMAT);
+			return format;
+		}
+		catch (Exception e)
+		{
+			logger.warn(logPrefix + "Could not read " + RECORDER_DATE_TIME_FORMAT_PROPERTY + ": " + e);
+			return null;
+		}
+	}
+
 	private void startRecording(PresenceGate.Start start)
 	{
 		try
@@ -177,8 +204,12 @@ public final class LiveRecorderBackend implements RecordingBackend, IStreamRecor
 			params.segmentationType = IStreamRecorderConstants.SEGMENT_NONE;
 			params.fileTemplate = nameTemplate;
 			params.notifyListener = this;
-			params.fileVersionDelegate = new EventRecordingFileVersionDelegate(start.trackIds(), start.classes(),
-					recordingStartMs);
+			EventRecordingFileVersionDelegate names = new EventRecordingFileVersionDelegate(start.trackIds(),
+					start.classes(), recordingStartMs, dateTimeFormat);
+			// From 4.13 the recorder hands its format to the delegate itself; an earlier Engine
+			// never calls the setter, so the application's property is read and passed here.
+			names.setDateTimeFormat(recorderDateTimeFormat);
+			params.fileVersionDelegate = names;
 			if (outputPath != null)
 				params.outputPath = outputPath;
 

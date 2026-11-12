@@ -281,4 +281,22 @@ public class EventRecordingPluginFileJobTest
 		assertEquals(1, clips.size());
 		assertEquals("testsrc-320x240-30fps-4s_00.00.01.000_person.mp4", clips.get(0).getFileName().toString());
 	}
+
+	@Test
+	public void theSegmentTimeOfAClipNameFollowsTheDateTimeFormat() throws IOException
+	{
+		Path source = sourceIn("job");
+		HashMap<String, Object> properties = fileJobProperties(source, 0, 0, 200);
+		properties.put("recording_name_template", "${SourceStreamName}_${SegmentTime}");
+		// A literal, so the name does not depend on when the test runs.
+		properties.put("date_time_format", "'cut'");
+		EventRecordingPlugin plugin = initialised(properties);
+
+		plugin.immediate(response(500, "person"));
+		plugin.onShutdown(jobEnded(ShutdownEvent.Reason.JOB_COMPLETED));
+
+		List<Path> clips = clipsBeside(source);
+		assertEquals(1, clips.size());
+		assertEquals("testsrc-320x240-30fps-4s_cut.mp4", clips.get(0).getFileName().toString());
+	}
 }

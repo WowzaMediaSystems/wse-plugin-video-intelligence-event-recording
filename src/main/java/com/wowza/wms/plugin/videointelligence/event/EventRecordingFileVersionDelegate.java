@@ -5,10 +5,8 @@
 package com.wowza.wms.plugin.videointelligence.event;
 
 import java.io.File;
-import java.text.SimpleDateFormat;
-import java.util.Date;
+import java.time.format.DateTimeFormatter;
 import java.util.LinkedHashSet;
-import java.util.Locale;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -29,17 +27,42 @@ public class EventRecordingFileVersionDelegate extends StreamRecorderFileVersion
 	public static final String CLASS_NAMES_TAG = RecordingNames.CLASS_NAMES_TAG;
 	public static final String TRACKING_IDS_TAG = RecordingNames.TRACKING_IDS_TAG;
 
-	private static final String DATETIME_FORMAT = "yyyy-MM-dd-HH.mm.ss.SSS-z";
-
 	private final Set<Integer> trackingIds;
 	private final Set<String> classNames;
 	private final long recordingStartMs;
+	// The listener's own date_time_format, which the recorder's may not replace; null without one.
+	private final DateTimeFormatter listenerFormat;
+	private volatile DateTimeFormatter recorderFormat;
 
 	public EventRecordingFileVersionDelegate(Set<Integer> trackingIds, Set<String> classNames, long recordingStartMs)
+	{
+		this(trackingIds, classNames, recordingStartMs, null);
+	}
+
+	public EventRecordingFileVersionDelegate(Set<Integer> trackingIds, Set<String> classNames, long recordingStartMs,
+			DateTimeFormatter listenerFormat)
 	{
 		this.trackingIds = new LinkedHashSet<>(trackingIds);
 		this.classNames = new LinkedHashSet<>(classNames);
 		this.recordingStartMs = recordingStartMs;
+		this.listenerFormat = listenerFormat;
+	}
+
+	/**
+	 * The recorder's {@code streamRecorderFileVersionDateTimeFormat}. From Engine 4.13 the base
+	 * delegate declares this method and the recorder calls it; the base keeps its formatter
+	 * private, so the format is kept here for the names this class builds. No {@code @Override}:
+	 * the method does not exist on an earlier Engine. A null, blank or invalid pattern leaves the
+	 * default format in place.
+	 */
+	public void setDateTimeFormat(String format)
+	{
+		this.recorderFormat = RecordingNames.dateTimeFormatter(format);
+	}
+
+	private DateTimeFormatter dateTimeFormat()
+	{
+		return listenerFormat != null ? listenerFormat : recorderFormat;
 	}
 
 	@Override
@@ -56,12 +79,12 @@ public class EventRecordingFileVersionDelegate extends StreamRecorderFileVersion
 			baseName = baseName.substring(0, extIndex);
 		}
 
-		SimpleDateFormat dates = new SimpleDateFormat(DATETIME_FORMAT, Locale.ROOT);
+		DateTimeFormatter dates = dateTimeFormat();
 		String name = RecordingNames.withoutExtension(getFileTemplate());
 		name = name.replace(STREAM_NAME_TAG, recContext.getStreamName());
 		name = name.replace(BASE_NAME_TAG, baseName);
-		name = name.replace(START_TIME_TAG, dates.format(new Date(recordingStartMs)));
-		name = name.replace(SEGMENT_TIME_TAG, dates.format(new Date()));
+		name = name.replace(START_TIME_TAG, RecordingNames.formatTime(recordingStartMs, dates));
+		name = name.replace(SEGMENT_TIME_TAG, RecordingNames.formatTime(System.currentTimeMillis(), dates));
 		name = name.replace(SEGMENT_NUMBER_TAG, Integer.toString(recContext.getSegmentNumber()));
 		name = name.replace(CLASS_NAMES_TAG, RecordingNames.sanitize(String.join("_", classNames)));
 		name = name.replace(TRACKING_IDS_TAG, RecordingNames.sanitize(

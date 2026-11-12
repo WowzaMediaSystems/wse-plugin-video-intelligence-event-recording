@@ -7,6 +7,7 @@ package com.wowza.wms.plugin.videointelligence.eventrecording;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
@@ -58,12 +59,13 @@ public final class VodClipBackend implements RecordingBackend
 	private final long preRollMs;
 	private final long postRollMs;
 	private final String nameTemplate;
+	private final DateTimeFormatter dateTimeFormat;
 
 	private final Object lock = new Object();
 	private final List<PendingCut> pending = new ArrayList<>();
 
 	public VodClipBackend(WMSLogger logger, String logPrefix, Path source, Path outputDir, Executor executor,
-			Reporter reporter, long preRollMs, long postRollMs, String nameTemplate)
+			Reporter reporter, long preRollMs, long postRollMs, String nameTemplate, DateTimeFormatter dateTimeFormat)
 	{
 		this.logger = logger;
 		this.logPrefix = logPrefix;
@@ -75,6 +77,7 @@ public final class VodClipBackend implements RecordingBackend
 		this.preRollMs = preRollMs;
 		this.postRollMs = postRollMs;
 		this.nameTemplate = nameTemplate;
+		this.dateTimeFormat = dateTimeFormat;
 	}
 
 	@Override
@@ -138,7 +141,8 @@ public final class VodClipBackend implements RecordingBackend
 	{
 		long fromMs = Math.max(0, end.fromMs() - preRollMs);
 		long toMs = end.toMs() + postRollMs;
-		String name = RecordingNames.clipName(nameTemplate, sourceName, fromMs, end.classes(), end.trackIds());
+		String name = RecordingNames.clipName(nameTemplate, sourceName, fromMs, end.classes(), end.trackIds(),
+				dateTimeFormat);
 		Path part = null;
 		try
 		{

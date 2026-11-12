@@ -58,6 +58,7 @@ The plugin is configured as a listener of a VIF stream configuration. The easies
       "merge_gap_ms": 0,
       "max_clip_ms": null,
       "recording_name_template": "${SourceStreamName}_${RecordingStartTime}",
+      "date_time_format": "",
       "record_stream_name": "",
       "output_path": "",
       "webhooks": true
@@ -90,6 +91,7 @@ Over the v2 REST API the same listener is a `custom` entry of the config's `list
 | `back_buffer_time` | number | `5000` | Milliseconds of video before the first detection. Live it comes from the WSE incoming stream buffer (~8s available) and starts on a keyframe; on a job it is cut from the file and can be any length. |
 | `post_detection_duration` | number | `5000` | Milliseconds to keep recording after the event ends. |
 | `recording_name_template` | text | `${SourceStreamName}_${RecordingStartTime}` | File naming template. See [Recording File Name Tokens](#recording-file-name-tokens) below. |
+| `date_time_format` | text | (none) | Java `DateTimeFormatter` pattern for `${RecordingStartTime}` (live) and `${SegmentTime}`, for example `yyyyMMdd_HHmmss`. Empty, a live stream uses the application's `streamRecorderFileVersionDateTimeFormat` StreamRecorder property when it has one; otherwise `yyyy-MM-dd-HH.mm.ss.SSS-z`. An invalid pattern logs a warning and falls back the same way. |
 | `record_stream_name` | text | (empty) | Live only. Regex pattern to match the stream name to record. Empty records the source stream. To record the VIF transcoder output (with overlays), use `.*-vi$`. Ignored on a job. |
 | `output_path` | text | (empty) | Directory for recorded files. Empty uses the WSE application default live, and the source file's directory on a job. |
 | `webhooks` | boolean | `true` | Send webhooks: `detection.start`/`detection.stop` per tracked object live, `recording.started`/`recording.stopped` per clip on a job. |

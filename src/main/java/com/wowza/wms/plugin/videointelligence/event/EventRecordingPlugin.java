@@ -7,6 +7,7 @@ package com.wowza.wms.plugin.videointelligence.event;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Instant;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -189,6 +190,11 @@ public class EventRecordingPlugin implements IVifEventListener, RecordingBackend
 		long backBufferMs = longProperty(properties, "back_buffer_time", DEFAULT_BACK_BUFFER_MS);
 		long postDetectionMs = longProperty(properties, "post_detection_duration", DEFAULT_POST_DETECTION_MS);
 		String nameTemplate = stringProperty(properties, "recording_name_template", RecordingNames.DEFAULT_TEMPLATE);
+		String dateTimePattern = trimmedOrNull(properties.get("date_time_format"));
+		DateTimeFormatter dateTimeFormat = RecordingNames.dateTimeFormatter(dateTimePattern);
+		if (dateTimePattern != null && dateTimeFormat == null)
+			logger.warn(logPrefix + "Invalid date_time_format '" + dateTimePattern + "'. Using "
+					+ RecordingNames.DEFAULT_DATE_TIME_FORMAT);
 		String outputPath = trimmedOrNull(properties.get("output_path"));
 		this.webhooksEnabled = boolProperty(properties, "webhooks", true);
 
@@ -201,7 +207,8 @@ public class EventRecordingPlugin implements IVifEventListener, RecordingBackend
 
 		if (fileJob)
 		{
-			this.backend = fileJobBackend(properties, outputPath, backBufferMs, postDetectionMs, nameTemplate);
+			this.backend = fileJobBackend(properties, outputPath, backBufferMs, postDetectionMs, nameTemplate,
+					dateTimeFormat);
 		}
 		else if (appInstance != null)
 		{
@@ -213,7 +220,7 @@ public class EventRecordingPlugin implements IVifEventListener, RecordingBackend
 				recordStream = null;
 			}
 			this.live = new LiveRecorderBackend(logger, logPrefix, appInstance, stream, executor, this,
-					backBufferMs, postDetectionMs, nameTemplate, outputPath, recordStream);
+					backBufferMs, postDetectionMs, nameTemplate, dateTimeFormat, outputPath, recordStream);
 			this.backend = live;
 		}
 		else
@@ -242,7 +249,7 @@ public class EventRecordingPlugin implements IVifEventListener, RecordingBackend
 	}
 
 	private RecordingBackend fileJobBackend(HashMap<String, Object> properties, String outputPath,
-			long backBufferMs, long postDetectionMs, String nameTemplate)
+			long backBufferMs, long postDetectionMs, String nameTemplate, DateTimeFormatter dateTimeFormat)
 	{
 		if (sourceFile == null)
 		{
@@ -254,7 +261,7 @@ public class EventRecordingPlugin implements IVifEventListener, RecordingBackend
 		Path source = Paths.get(sourceFile);
 		Path outputDir = outputPath != null ? Paths.get(outputPath) : source.toAbsolutePath().getParent();
 		return new VodClipBackend(logger, logPrefix, source, outputDir, executor, this, backBufferMs,
-				postDetectionMs, nameTemplate);
+				postDetectionMs, nameTemplate, dateTimeFormat);
 	}
 
 	@Override

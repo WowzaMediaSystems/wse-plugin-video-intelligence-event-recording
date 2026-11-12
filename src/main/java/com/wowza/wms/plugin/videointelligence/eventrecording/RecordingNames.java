@@ -8,8 +8,10 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.text.SimpleDateFormat;
-import java.util.Date;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
@@ -32,7 +34,10 @@ public final class RecordingNames
 	public static final String TRACKING_IDS_TAG = "${TrackingIds}";
 
 	public static final String DEFAULT_TEMPLATE = STREAM_NAME_TAG + "_" + START_TIME_TAG;
-	private static final String DATETIME_FORMAT = "yyyy-MM-dd-HH.mm.ss.SSS-z";
+	/** The Engine's own format for {@code ${RecordingStartTime}} and {@code ${SegmentTime}}. */
+	public static final String DEFAULT_DATE_TIME_FORMAT = "yyyy-MM-dd-HH.mm.ss.SSS-z";
+	public static final DateTimeFormatter DEFAULT_DATE_TIME_FORMATTER = DateTimeFormatter
+			.ofPattern(DEFAULT_DATE_TIME_FORMAT);
 	private static final String EXTENSION = ".mp4";
 	private static final Object PUBLISH_LOCK = new Object();
 	private static final AtomicLong PART_SEQUENCE = new AtomicLong();
@@ -46,14 +51,13 @@ public final class RecordingNames
 	 * of {@code sourceName}: the template rendered.
 	 */
 	public static String clipName(String template, String sourceName, long fromMs, Set<String> classNames,
-			Set<Integer> trackIds)
+			Set<Integer> trackIds, DateTimeFormatter dateTimeFormat)
 	{
 		String name = withoutExtension(template == null || template.isBlank() ? DEFAULT_TEMPLATE : template);
 		name = name.replace(STREAM_NAME_TAG, sourceName);
 		name = name.replace(BASE_NAME_TAG, sourceName);
 		name = name.replace(START_TIME_TAG, mediaOffset(fromMs));
-		name = name.replace(SEGMENT_TIME_TAG,
-				new SimpleDateFormat(DATETIME_FORMAT, Locale.ROOT).format(new Date()));
+		name = name.replace(SEGMENT_TIME_TAG, formatTime(System.currentTimeMillis(), dateTimeFormat));
 		name = name.replace(SEGMENT_NUMBER_TAG, "0");
 		name = name.replace(CLASS_NAMES_TAG, sanitize(String.join("_", classNames)));
 		name = name.replace(TRACKING_IDS_TAG,
@@ -86,6 +90,34 @@ public final class RecordingNames
 				candidate = directory.resolve(name + "_" + version + EXTENSION);
 			return Files.move(part, candidate, StandardCopyOption.ATOMIC_MOVE);
 		}
+	}
+
+	/**
+	 * The formatter for a {@code DateTimeFormatter} pattern, built as the Engine's recorder
+	 * builds the one for {@code streamRecorderFileVersionDateTimeFormat}: surrounding whitespace
+	 * ignored, the JVM's locale.
+	 *
+	 * @return null when the pattern is null, blank or not a valid pattern.
+	 */
+	public static DateTimeFormatter dateTimeFormatter(String pattern)
+	{
+		if (pattern == null || pattern.isBlank())
+			return null;
+		try
+		{
+			return DateTimeFormatter.ofPattern(pattern.trim());
+		}
+		catch (IllegalArgumentException e)
+		{
+			return null;
+		}
+	}
+
+	/** A wall-clock instant in the Engine's time zone; a null format is the default one. */
+	public static String formatTime(long epochMs, DateTimeFormatter format)
+	{
+		DateTimeFormatter formatter = format != null ? format : DEFAULT_DATE_TIME_FORMATTER;
+		return formatter.format(ZonedDateTime.ofInstant(Instant.ofEpochMilli(epochMs), ZoneId.systemDefault()));
 	}
 
 	/** {@code HH.mm.ss.SSS} of a media offset — sortable, and legal in a file name. */

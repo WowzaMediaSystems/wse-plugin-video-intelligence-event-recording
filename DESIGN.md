@@ -188,7 +188,10 @@ file itself.
 ### `EventRecordingFileVersionDelegate`
 
 As in 1.0.0: with `SEGMENT_NONE` the base delegate returns the base file path untouched, so every
-token is expanded here, `${RecordingStartTime}` from the first-frame wall clock computed by the
+token is expanded here, in the listener's `date_time_format`, else the application's
+`streamRecorderFileVersionDateTimeFormat`, else the Engine's default pattern. The delegate declares
+`setDateTimeFormat(String)` without `@Override`: Engine 4.13 adds it to the base delegate and calls
+it from the recorder, and the base keeps its formatter private. `${RecordingStartTime}` comes from the first-frame wall clock computed by the
 keyframe walk. The token vocabulary is `RecordingNames`, shared with the VOD naming.
 
 ## Edge Cases
