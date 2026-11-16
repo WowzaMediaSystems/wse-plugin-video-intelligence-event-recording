@@ -94,7 +94,10 @@ Over the v2 REST API the same listener is a `custom` entry of the config's `list
 | `date_time_format` | text | (none) | Java `DateTimeFormatter` pattern for `${RecordingStartTime}` (live) and `${SegmentTime}`, for example `yyyyMMdd_HHmmss`. Empty, a live stream uses the application's `streamRecorderFileVersionDateTimeFormat` StreamRecorder property when it has one; otherwise `yyyy-MM-dd-HH.mm.ss.SSS-z`. An invalid pattern logs a warning and falls back the same way. |
 | `record_stream_name` | text | (empty) | Live only. Regex pattern to match the stream name to record. Empty records the source stream. To record the VIF transcoder output (with overlays), use `.*-vi$`. Ignored on a job. |
 | `output_path` | text | (empty) | Directory for recorded files. Empty uses the WSE application default live, and the source file's directory on a job. |
-| `webhooks` | boolean | `true` | Send webhooks: `detection.start`/`detection.stop` per tracked object live, `recording.started`/`recording.stopped` per clip on a job. |
+| `webhooks` | boolean | `true` | Send webhooks: `detection.start`/`detection.stop` per tracked object live, `recording.started`/`recording.stopped` per clip on a job. Where they go: see [Webhooks](#webhooks). |
+| `url` | text | (empty) | Destination the events are POSTed to: an absolute http(s) URL with a host. Empty: the Engine's webhooks are used. |
+| `credential_secret` | secret | (empty) | Name of a VIF secret sent as the credential to `url`. Resolved at delivery, so rotating the value needs no change here. |
+| `credential_header` | text | (empty) | Header the credential travels in. Empty: `Authorization`. |
 
 The listener's own `min_confidence` (the `confidence_threshold` of the `vif_event_listeners` entry) filters detections before they reach the plugin.
 
@@ -123,6 +126,15 @@ A job submitted to `/v2/vif/vod/jobs` runs the listeners of the configuration it
 - Clips land next to the source file unless `output_path` says otherwise, and are reported by a log line and, with `webhooks` on, a `recording.started` + `recording.stopped` pair carrying `job_id`, `source_file` and the file path.
 - A job resumed after an interruption re-initialises the listener; an event that straddled the interruption yields two clips.
 - Overlays are a live transcoder feature; a VOD clip is the plain source.
+
+### Webhooks
+
+With `webhooks` on, the events go to one of two places:
+
+- **A destination on the listener** (`url` set): the VIF controller's detection webhooks deliver them, the same channel its own Webhook listener uses. Each event is POSTed to `url` in the controller's detection envelope (`name` `video.intelligence.detection`, with `id`, `source`, `version`, `timestamp` and `context`), and the listener's payload is the `data.event_recording_data` member. The credential is the VIF secret `credential_secret` names, sent in `credential_header`. Delivery never holds the stream up: it is queued, a consumer that falls behind loses its oldest pending events, and there are no retries.
+- **The Engine's webhooks** (`url` empty): the events are published as `VI_DETECTION` events and the destinations and filters are those of the Engine's `conf/Webhooks.json`. This is also what happens on a controller too old to have detection webhooks, with a warning in the log.
+
+A `url` that is not an absolute http(s) URL with a host disables the webhooks, with a warning.
 
 ## Installation
 

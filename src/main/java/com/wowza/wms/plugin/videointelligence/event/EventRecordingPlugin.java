@@ -37,17 +37,17 @@ import com.wowza.wms.plugin.videointelligence.eventrecording.RecordingBackend;
 import com.wowza.wms.plugin.videointelligence.eventrecording.RecordingNames;
 import com.wowza.wms.plugin.videointelligence.eventrecording.ReleaseInfo;
 import com.wowza.wms.plugin.videointelligence.eventrecording.VodClipBackend;
+import com.wowza.wms.plugin.videointelligence.eventrecording.webhook.EngineWebhookChannel;
+import com.wowza.wms.plugin.videointelligence.eventrecording.webhook.VicNotifierQueue;
+import com.wowza.wms.plugin.videointelligence.eventrecording.webhook.VicWebhookChannel;
+import com.wowza.wms.plugin.videointelligence.eventrecording.webhook.WebhookChannel;
+import com.wowza.wms.plugin.videointelligence.eventrecording.webhook.WebhookContext;
 import com.wowza.wms.plugin.videointelligence.message.DetectionData;
 import com.wowza.wms.plugin.videointelligence.message.DetectionResponse;
 import com.wowza.wms.plugin.videointelligence.message.ObjectDetectionData;
 import com.wowza.wms.server.Server;
 import com.wowza.wms.stream.IMediaStream;
 import com.wowza.wms.vhost.IVHost;
-import com.wowza.wms.webhooks.WebhookEvent;
-import com.wowza.wms.webhooks.WebhookEventContext;
-import com.wowza.wms.webhooks.WebhookEventEntity;
-import com.wowza.wms.webhooks.WebhookEventName;
-import com.wowza.wms.webhooks.WebhookListener;
 
 /**
  * Records one MP4 per presence event of the configured classes: a back buffer before the first
@@ -121,7 +121,7 @@ public class EventRecordingPlugin implements IVifEventListener, RecordingBackend
 	private ScheduledExecutorService executor;
 
 	private boolean webhooksEnabled = true;
-	private WebhookListener webhookListener;
+	private WebhookChannel webhooks;
 
 	private final Object lock = new Object();
 	private long lastAtMs = Long.MIN_VALUE;
@@ -165,7 +165,7 @@ public class EventRecordingPlugin implements IVifEventListener, RecordingBackend
 		}
 		this.backend = null;
 		this.live = null;
-		this.webhookListener = null;
+		closeWebhooks();
 		this.jobId = trimmedOrNull(properties.get("job_id"));
 		this.sourceFile = trimmedOrNull(properties.get("source_file"));
 		this.fileJob = jobId != null;
@@ -230,11 +230,7 @@ public class EventRecordingPlugin implements IVifEventListener, RecordingBackend
 		}
 
 		if (webhooksEnabled)
-		{
-			this.webhookListener = engineWebhookListener();
-			if (webhookListener == null)
-				logger.warn(logPrefix + "No WebhookListener found. Webhooks will be disabled");
-		}
+			this.webhooks = webhookChannel(properties);
 
 		logger.info(logPrefix + "Starting EventRecordingPlugin v" + MODULE_VERSION
 				+ (fileJob ? " for file job " + jobId : " for live stream")
@@ -331,6 +327,18 @@ public class EventRecordingPlugin implements IVifEventListener, RecordingBackend
 
 	@Override
 	public void onShutdown(ShutdownEvent event)
+	{
+		try
+		{
+			shutDown(event);
+		}
+		finally
+		{
+			closeWebhooks();
+		}
+	}
+
+	private void shutDown(ShutdownEvent event)
 	{
 		if (backend == null)
 			return;
@@ -554,40 +562,83 @@ public class EventRecordingPlugin implements IVifEventListener, RecordingBackend
 
 	private void sendWebhook(Map<String, Object> payload)
 	{
-		if (webhookListener == null)
+		WebhookChannel channel = webhooks;
+		if (channel == null)
 			return;
 		if (fileJob)
 		{
 			payload.put("job_id", jobId);
 			payload.put("source_file", sourceFile);
 		}
-		try
-		{
-			Map<String, Object> data = new HashMap<>();
-			data.put("event_recording_data", payload);
-			WebhookEvent event = new WebhookEvent(WebhookEventName.VI_DETECTION);
-			event.setContext(WebhookEventContext.forEntity(vHostName, appName, appInstanceName, streamName,
-					WebhookEventEntity.OBJECTS));
-			event.setData(data);
-			webhookListener.addEvent(event);
-		}
-		catch (Exception e)
-		{
-			logger.error(logPrefix + "Webhook Error: " + e.getMessage(), e);
-		}
+		channel.send(payload);
 	}
 
-	private WebhookListener engineWebhookListener()
+	/**
+	 * A destination set on the listener is delivered to by the controller's webhooks; with none,
+	 * or on a controller that has no such webhooks, the events go to the Engine's.
+	 */
+	private WebhookChannel webhookChannel(Map<String, Object> properties)
+	{
+		WebhookContext context = new WebhookContext(vHostName, appName, appInstanceName, streamName);
+		String url = trimmedOrNull(properties.get("url"));
+		if (url != null)
+		{
+			if (!VicWebhookChannel.isDeliverable(url))
+			{
+				logger.warn(logPrefix + "Webhook url '" + url + "' is not an absolute http(s) URL with a host."
+						+ " Webhooks will be disabled");
+				return null;
+			}
+			VicWebhookChannel.Queue queue = controllerWebhookQueue(context,
+					trimmedOrNull(properties.get("listener_name")));
+			if (queue != null)
+			{
+				logger.info(logPrefix + "Webhooks are delivered to " + url + " by the controller");
+				return new VicWebhookChannel(logger, logPrefix, queue, url,
+						trimmedOrNull(properties.get("credential_secret")),
+						trimmedOrNull(properties.get("credential_header")), serverGuid(), context);
+			}
+			logger.warn(logPrefix + "This controller has no detection webhooks, so the listener's url is not"
+					+ " used: the events go to the Engine's webhooks instead");
+		}
+		WebhookChannel engine = EngineWebhookChannel.open(logger, logPrefix, context);
+		if (engine == null)
+			logger.warn(logPrefix + "No WebhookListener found. Webhooks will be disabled");
+		return engine;
+	}
+
+	/** @return null on a controller that has no detection webhooks. */
+	protected VicWebhookChannel.Queue controllerWebhookQueue(WebhookContext context, String listenerName)
 	{
 		try
 		{
-			return (WebhookListener)Server.getInstance().getProperties().getProperty("WebhookListener");
+			return VicNotifierQueue.open(context, listenerName);
 		}
-		catch (Exception e)
+		catch (LinkageError e)
 		{
-			logger.warn(logPrefix + "Could not reach the Engine's webhook listener: " + e);
 			return null;
 		}
+	}
+
+	private static String serverGuid()
+	{
+		try
+		{
+			Server server = Server.getInstance();
+			return server == null ? null : server.getServerGUID();
+		}
+		catch (Throwable t)
+		{
+			return null;
+		}
+	}
+
+	private void closeWebhooks()
+	{
+		WebhookChannel channel = webhooks;
+		webhooks = null;
+		if (channel != null)
+			channel.close();
 	}
 
 	private boolean isTranscoderEnabled()
