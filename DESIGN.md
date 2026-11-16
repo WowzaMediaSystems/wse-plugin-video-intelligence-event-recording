@@ -185,6 +185,51 @@ file itself.
     "recording": { "file": "...", "from_ms": 219800 } } }
 ```
 
+### Clip analysis
+
+With `analyze_clips` on, `EventRecordingPlugin.recordingStopped` — the one place both backends
+report a finished file — hands the clip to `ClipAnalysis`, which works on one daemon thread of
+its own, shared by every listener, so a slow or absent REST interface never holds a recorder or a
+cut. Per clip:
+
+- a listener running inside a job tagged `event-recording` still cuts its clips but submits none
+  (read once per job from `GET /v2/vif/vod/jobs/{id}`): an analysis config that includes this
+  listener would otherwise analyse clips of clips without end;
+- it makes room under its own cap. The controller's registry forgets its oldest finished job for
+  every job past `max_jobs`, whoever submitted it, so unbounded clip jobs would cost an operator
+  their own. From `GET /v2/vif/vod/jobs?tag=event-recording` it removes the oldest finished jobs
+  (`DELETE /v2/vif/vod/jobs/{id}`) until fewer than `min(max_analysis_jobs, max_jobs - 1)` are
+  left. When the ones left are all queued or running the clip stays at the head of a queue (200
+  at most) and the pass is run again 15 seconds later;
+- it reads the content directory from `GET /v2/vif/persist/vod-settings`, resolved exactly as the
+  controller's `VodSettingsResolver` does in this same process (`content_dir` as written, so a
+  relative one against the working directory; absent means `<ConfigHome>/content`), and copies a
+  clip written outside it into its `event-recording` folder, under a free name, since a VOD job
+  names its file relative to that directory;
+- it submits `POST /v2/vif/vod/jobs` with the config `analysis_config` names and the tag.
+
+The `event-recording` folder holds nothing but these copies, which is what lets them be removed:
+with the job that is removed to make room, at once when the submission is refused (an HTTP
+answer; a timeout may have queued the job, so that copy stays), and, before each new copy, any
+copy older than ten minutes that no tagged job names. The removals of old copies go through
+`DELETE /v2/vif/vod/files`, which refuses a file a queued or running job reads.
+
+`VifApi` is the HTTP client. It answers the Basic or Digest challenge itself (RFC 7616, MD5 and
+SHA-256, `qop=auth`, and the RFC 2069 form) instead of leaving it to the JDK's `Authenticator`,
+which refuses MD5 over plain HTTP from JDK 20 and has no SHA-256 before it — the two algorithms
+the Engine sends. The challenge is kept, so only the first request of a client, or one whose
+nonce expired, costs a second round trip.
+
+The listener runs inside the Engine but is handed no credentials, so the REST user is a
+property. The password is not: `api_password_secret` names a controller secret, resolved through
+`SecretsRuntime` at each request, because a listener's properties are copied verbatim into the
+manifest of every job run under the config and served back by `GET /v2/vif/vod/jobs/{id}`.
+
+In the Manager, `EventRecordingPlugin.js` shows `analysis_config` as a dropdown: the listener
+editor has no field that lists configs, so the field is declared as text and the script puts a
+select in front of the text box, filled through the page's own API client. On a page where that
+client or the field's markup differ, the text box is left as it is.
+
 ### `EventRecordingFileVersionDelegate`
 
 As in 1.0.0: with `SEGMENT_NONE` the base delegate returns the base file path untouched, so every
