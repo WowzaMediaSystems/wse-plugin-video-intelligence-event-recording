@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.Executor;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -21,6 +22,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import com.wowza.wms.plugin.videointelligence.api.ShutdownEvent;
+import com.wowza.wms.plugin.videointelligence.eventrecording.analysis.ClipAnalysis;
 import com.wowza.wms.plugin.videointelligence.eventrecording.clip.Mp4FileClipper;
 import com.wowza.wms.plugin.videointelligence.message.BoundingBoxData;
 import com.wowza.wms.plugin.videointelligence.message.DetectionWindowData;
@@ -298,5 +300,87 @@ public class EventRecordingPluginFileJobTest
 		List<Path> clips = clipsBeside(source);
 		assertEquals(1, clips.size());
 		assertEquals("testsrc-320x240-30fps-4s_cut.mp4", clips.get(0).getFileName().toString());
+	}
+
+	@Test
+	public void aCutClipIsSubmittedForAnalysisWithTheNamedConfig() throws IOException
+	{
+		Path source = sourceIn("content");
+		List<String> calls = new ArrayList<>();
+		List<String> clients = new ArrayList<>();
+		EventRecordingPlugin plugin = new EventRecordingPlugin()
+		{
+			@Override
+			protected ClipAnalysis.Api analysisApi(String url, String user, String password)
+			{
+				clients.add(url + " " + user + " " + password);
+				return new ClipAnalysis.Api()
+				{
+					@Override
+					public String get(String path)
+					{
+						calls.add("GET " + path);
+						if (path.equals("/persist/vod-settings"))
+							return "{\"content_dir\":\"" + source.getParent().toString().replace("\\", "\\\\") + "\"}";
+						return "{\"job_id\":\"job-1\"}";
+					}
+
+					@Override
+					public String post(String path, String json)
+					{
+						calls.add("POST " + path + " " + json);
+						return "{\"job_id\":\"job-2\"}";
+					}
+				};
+			}
+
+			@Override
+			protected Executor analysisExecutor()
+			{
+				return Runnable::run;
+			}
+		};
+		HashMap<String, Object> properties = fileJobProperties(source, 500, 500, 300);
+		properties.put("analyze_clips", true);
+		properties.put("analysis_config", "clips_config");
+		properties.put("api_url", "https://engine:8087");
+		properties.put("api_user", "admin");
+		properties.put("api_password", "s3cret");
+		plugin.onInit(null, namedStream("vod-job-1"), Set.of("immediate"), properties);
+
+		plugin.immediate(response(1500, "person"));
+		plugin.onShutdown(jobEnded(ShutdownEvent.Reason.JOB_COMPLETED));
+
+		assertEquals(List.of("https://engine:8087 admin s3cret"), clients);
+		assertEquals(List.of("GET /vod/jobs/job-1", "GET /persist/vod-settings",
+				"POST /vod/jobs {\"file\":\"testsrc-320x240-30fps-4s_00.00.01.000_person.mp4\","
+						+ "\"stream_group_config\":\"clips_config\",\"tag\":\"event-recording\"}"),
+				calls);
+	}
+
+	@Test
+	public void analysisWithNoConfigNamedSubmitsNothing() throws IOException
+	{
+		Path source = sourceIn("content");
+		List<String> clients = new ArrayList<>();
+		EventRecordingPlugin plugin = new EventRecordingPlugin()
+		{
+			@Override
+			protected ClipAnalysis.Api analysisApi(String url, String user, String password)
+			{
+				clients.add(url);
+				return null;
+			}
+		};
+		HashMap<String, Object> properties = fileJobProperties(source, 500, 500, 300);
+		properties.put("analyze_clips", true);
+		properties.put("analysis_config", " ");
+		plugin.onInit(null, namedStream("vod-job-1"), Set.of("immediate"), properties);
+
+		plugin.immediate(response(1500, "person"));
+		plugin.onShutdown(jobEnded(ShutdownEvent.Reason.JOB_COMPLETED));
+
+		assertEquals(List.of(), clients);
+		assertEquals(1, clipsBeside(source).size());
 	}
 }

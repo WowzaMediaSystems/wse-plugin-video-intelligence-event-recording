@@ -95,8 +95,22 @@ Over the v2 REST API the same listener is a `custom` entry of the config's `list
 | `record_stream_name` | text | (empty) | Live only. Regex pattern to match the stream name to record. Empty records the source stream. To record the VIF transcoder output (with overlays), use `.*-vi$`. Ignored on a job. |
 | `output_path` | text | (empty) | Directory for recorded files. Empty uses the WSE application default live, and the source file's directory on a job. |
 | `webhooks` | boolean | `true` | Send webhooks: `detection.start`/`detection.stop` per tracked object live, `recording.started`/`recording.stopped` per clip on a job. |
+| `analyze_clips` | boolean | `false` | Submit every finished clip as a VOD analysis job of its own. See [Clip Analysis](#clip-analysis). |
+| `analysis_config` | text | (empty) | Name of the stream group config the clips are analysed with. Required when `analyze_clips` is on. The Manager shows it as a dropdown of the existing configs. |
+| `api_url` | text | `http://localhost:8087` | Base URL of the Engine REST interface the jobs are submitted to. |
+| `api_user` | text | (empty) | Engine REST user. Empty when the REST interface asks for no credentials. |
+| `api_password` | text | (empty) | Password of the Engine REST user. Stored in the stream configuration as written. |
 
 The listener's own `min_confidence` (the `confidence_threshold` of the `vif_event_listeners` entry) filters detections before they reach the plugin.
+
+### Clip Analysis
+
+With `analyze_clips` on, each clip is submitted as a VOD job through the VIF REST API (`POST /v2/vif/vod/jobs`) once its file is complete, live recordings and file-job clips alike. The job runs under the stream group config `analysis_config` names and is stored like any other analysis: it shows in the VOD Analysis page and in `GET /v2/vif/vod/jobs?tag=event-recording`.
+
+- A job reads its source from the VOD content directory. A clip written anywhere else (`output_path`, or an application whose storage directory is not the content directory) is copied into the content directory under its own name, with a `_1`, `_2` suffix when the name is taken; the original stays where it was written.
+- The listener calls the Engine's REST interface, so it needs `api_user` and `api_password` wherever that interface asks for credentials, and `api_url` when it is not `http://localhost:8087`.
+- The jobs are tagged `event-recording`. A listener running inside a job with that tag still cuts its clips but submits none, so a config that analyses clips with this same listener does not analyse clips of clips.
+- A submission that fails is logged and does not affect the recording.
 
 ### Recording File Name Tokens
 

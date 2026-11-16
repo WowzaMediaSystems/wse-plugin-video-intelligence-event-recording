@@ -185,6 +185,29 @@ file itself.
     "recording": { "file": "...", "from_ms": 219800 } } }
 ```
 
+### Clip analysis
+
+With `analyze_clips` on, `EventRecordingPlugin.recordingStopped` — the one place both backends
+report a finished file — hands the clip to `ClipAnalysis`, which works on its own daemon thread so
+a slow or absent REST interface never holds a recorder or a cut:
+
+- it reads the content directory from `GET /v2/vif/persist/vod-settings` (`content_dir`; absent
+  means `<ConfigHome>/content`), and copies a clip written outside it into it, under a free name,
+  since a VOD job names its file relative to that directory;
+- it submits `POST /v2/vif/vod/jobs` with the config `analysis_config` names and the tag
+  `event-recording`;
+- a listener running inside a job that carries that tag still cuts its clips but submits none
+  (read once per job from `GET /v2/vif/vod/jobs/{id}`): an analysis config that includes this
+  listener would otherwise analyse clips of clips without end.
+
+`VifApi` is the HTTP client (Basic and Digest, through the JDK's `Authenticator`). The listener
+runs inside the Engine but is handed no credentials, so the REST user is a property.
+
+In the Manager, `EventRecordingPlugin.js` shows `analysis_config` as a dropdown: the listener
+editor has no field that lists configs, so the field is declared as text and the script puts a
+select in front of the text box, filled through the page's own API client. On a page where that
+client or the field's markup differ, the text box is left as it is.
+
 ### `EventRecordingFileVersionDelegate`
 
 As in 1.0.0: with `SEGMENT_NONE` the base delegate returns the base file path untouched, so every

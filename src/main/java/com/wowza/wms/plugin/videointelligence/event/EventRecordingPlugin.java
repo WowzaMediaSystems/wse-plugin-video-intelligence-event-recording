@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -37,6 +38,8 @@ import com.wowza.wms.plugin.videointelligence.eventrecording.RecordingBackend;
 import com.wowza.wms.plugin.videointelligence.eventrecording.RecordingNames;
 import com.wowza.wms.plugin.videointelligence.eventrecording.ReleaseInfo;
 import com.wowza.wms.plugin.videointelligence.eventrecording.VodClipBackend;
+import com.wowza.wms.plugin.videointelligence.eventrecording.analysis.ClipAnalysis;
+import com.wowza.wms.plugin.videointelligence.eventrecording.analysis.VifApi;
 import com.wowza.wms.plugin.videointelligence.message.DetectionData;
 import com.wowza.wms.plugin.videointelligence.message.DetectionResponse;
 import com.wowza.wms.plugin.videointelligence.message.ObjectDetectionData;
@@ -119,6 +122,7 @@ public class EventRecordingPlugin implements IVifEventListener, RecordingBackend
 	private RecordingBackend backend;
 	private LiveRecorderBackend live;
 	private ScheduledExecutorService executor;
+	private ClipAnalysis clipAnalysis;
 
 	private boolean webhooksEnabled = true;
 	private WebhookListener webhookListener;
@@ -166,6 +170,7 @@ public class EventRecordingPlugin implements IVifEventListener, RecordingBackend
 		this.backend = null;
 		this.live = null;
 		this.webhookListener = null;
+		this.clipAnalysis = null;
 		this.jobId = trimmedOrNull(properties.get("job_id"));
 		this.sourceFile = trimmedOrNull(properties.get("source_file"));
 		this.fileJob = jobId != null;
@@ -229,6 +234,9 @@ public class EventRecordingPlugin implements IVifEventListener, RecordingBackend
 					+ " record into. Nothing will be recorded.");
 		}
 
+		if (backend != null)
+			this.clipAnalysis = clipAnalysisOf(properties);
+
 		if (webhooksEnabled)
 		{
 			this.webhookListener = engineWebhookListener();
@@ -245,7 +253,43 @@ public class EventRecordingPlugin implements IVifEventListener, RecordingBackend
 				+ " postDetection:" + postDetectionMs + "ms"
 				+ " lostObjectDuration:" + settings.lostMs() + "ms"
 				+ " mergeGap:" + settings.mergeGapMs() + "ms"
-				+ " maxClip:" + settings.maxClipMs() + "ms");
+				+ " maxClip:" + settings.maxClipMs() + "ms"
+				+ " analyzeClips:" + (clipAnalysis != null));
+	}
+
+	private ClipAnalysis clipAnalysisOf(HashMap<String, Object> properties)
+	{
+		if (!boolProperty(properties, "analyze_clips", false))
+			return null;
+		String config = trimmedOrNull(properties.get("analysis_config"));
+		if (config == null)
+		{
+			logger.warn(logPrefix + "analyze_clips is on but analysis_config names no stream group config."
+					+ " Clips will not be analysed.");
+			return null;
+		}
+		ClipAnalysis.Api api = analysisApi(trimmedOrNull(properties.get("api_url")),
+				trimmedOrNull(properties.get("api_user")), trimmedOrNull(properties.get("api_password")));
+		return new ClipAnalysis(logger, logPrefix, api, analysisExecutor(), config, jobId, engineHome());
+	}
+
+	/** The API the clips are submitted through; a test stands in for the Engine here. */
+	protected ClipAnalysis.Api analysisApi(String url, String user, String password)
+	{
+		return new VifApi(url, user, password);
+	}
+
+	protected Executor analysisExecutor()
+	{
+		return ClipAnalysis.sharedExecutor();
+	}
+
+	private static Path engineHome()
+	{
+		String home = System.getProperty("com.wowza.wms.ConfigHome");
+		if (home == null || home.isBlank())
+			home = System.getProperty("com.wowza.wms.AppHome", "");
+		return Paths.get(home).toAbsolutePath();
 	}
 
 	private RecordingBackend fileJobBackend(HashMap<String, Object> properties, String outputPath,
@@ -481,6 +525,8 @@ public class EventRecordingPlugin implements IVifEventListener, RecordingBackend
 			payload.put("size_bytes", sizeBytes);
 			sendWebhook(payload);
 		}
+		if (clipAnalysis != null && file != null && sizeBytes > 0)
+			clipAnalysis.submit(Paths.get(file));
 	}
 
 	private Map<String, Object> recordingPayload(String action, String file, long fromMs, Long startedAtEpochMs)
