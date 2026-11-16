@@ -36,6 +36,7 @@ import java.util.regex.Pattern;
  */
 public final class VifApi implements ClipAnalysis.Api
 {
+	/** Where the Engine's REST interface listens when the listener names no URL. */
 	public static final String DEFAULT_URL = "http://localhost:8087";
 
 	private static final String API_ROOT = "/v2/vif";
@@ -171,6 +172,7 @@ public final class VifApi implements ClipAnalysis.Api
 	private volatile Challenge challenge;
 
 	/**
+	 * @param url the base URL of the Engine's REST interface, {@link #DEFAULT_URL} when blank
 	 * @param user null for an Engine whose REST interface asks for no credentials
 	 * @param password read at each request, so a changed one applies to the next
 	 */

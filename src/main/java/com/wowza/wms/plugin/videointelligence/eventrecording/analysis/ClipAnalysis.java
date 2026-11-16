@@ -50,10 +50,25 @@ public final class ClipAnalysis
 	/** The calls this needs of the VIF REST API; paths are relative to the API root. */
 	public interface Api
 	{
+		/**
+		 * @param path the resource, with its query
+		 * @return the answer's body
+		 * @throws IOException when the API cannot be reached or refuses
+		 */
 		String get(String path) throws IOException;
 
+		/**
+		 * @param path the resource
+		 * @param json the request body
+		 * @return the answer's body
+		 * @throws IOException when the API cannot be reached or refuses
+		 */
 		String post(String path, String json) throws IOException;
 
+		/**
+		 * @param path the resource, with its query
+		 * @throws IOException when the API cannot be reached or refuses
+		 */
 		void delete(String path) throws IOException;
 	}
 
@@ -64,12 +79,17 @@ public final class ClipAnalysis
 
 		private final int status;
 
+		/**
+		 * @param status the HTTP status of the answer
+		 * @param message the request and what it was answered
+		 */
 		public Refused(int status, String message)
 		{
 			super(message);
 			this.status = status;
 		}
 
+		/** @return the HTTP status of the answer */
 		public int status()
 		{
 			return status;
@@ -79,13 +99,18 @@ public final class ClipAnalysis
 	/** One thread the submissions run on, in order, and run on again after a wait. */
 	public interface Worker
 	{
+		/** @param task run after the ones already handed over */
 		void run(Runnable task);
 
+		/** @param task run once the wait between two tries is over */
 		void later(Runnable task);
 	}
 
+	/** The tag every job submitted here carries. */
 	public static final String JOB_TAG = "event-recording";
+	/** The folder of the content directory the copies are made in. */
 	public static final String COPIES_DIR = "event-recording";
+	/** How many tagged jobs are kept when the listener names no number. */
 	public static final int DEFAULT_MAX_JOBS = 10;
 
 	static final int MAX_WAITING = 200;
@@ -130,6 +155,10 @@ public final class ClipAnalysis
 	private Boolean hostIsClipJob;
 
 	/**
+	 * @param logger where the submissions are reported
+	 * @param logPrefix what every line of this listener starts with
+	 * @param api the VIF REST API
+	 * @param worker the thread the submissions run on
 	 * @param config the stream group config the clips are analysed with, by name
 	 * @param maxJobs how many tagged jobs are kept at most
 	 * @param hostJobId the job this listener runs in, null on a live stream
@@ -148,6 +177,7 @@ public final class ClipAnalysis
 		this.configHome = configHome;
 	}
 
+	/** @return the one worker every listener in the Engine submits on */
 	public static Worker sharedWorker()
 	{
 		return SHARED;
@@ -177,7 +207,11 @@ public final class ClipAnalysis
 		};
 	}
 
-	/** Queues the clip; nothing here fails the recording it came from. */
+	/**
+	 * Queues the clip; nothing here fails the recording it came from.
+	 *
+	 * @param clip the finished file
+	 */
 	public void submit(Path clip)
 	{
 		worker.run(() ->
