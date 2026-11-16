@@ -99,7 +99,8 @@ Over the v2 REST API the same listener is a `custom` entry of the config's `list
 | `analysis_config` | text | (empty) | Name of the stream group config the clips are analysed with. Required when `analyze_clips` is on. The Manager shows it as a dropdown of the existing configs. |
 | `api_url` | text | `http://localhost:8087` | Base URL of the Engine REST interface the jobs are submitted to. |
 | `api_user` | text | (empty) | Engine REST user. Empty when the REST interface asks for no credentials. |
-| `api_password` | text | (empty) | Password of the Engine REST user. Stored in the stream configuration as written. |
+| `api_password_secret` | secret | (empty) | Name of the VIF secret (Secrets page, `PATCH /v2/vif/persist/secrets`) that holds the password of the Engine REST user. The password itself is never written to the stream configuration or to a job record. |
+| `max_analysis_jobs` | number | `10` | How many clip analysis jobs are kept, counted over every listener. See [Clip Analysis](#clip-analysis). |
 
 The listener's own `min_confidence` (the `confidence_threshold` of the `vif_event_listeners` entry) filters detections before they reach the plugin.
 
@@ -107,8 +108,10 @@ The listener's own `min_confidence` (the `confidence_threshold` of the `vif_even
 
 With `analyze_clips` on, each clip is submitted as a VOD job through the VIF REST API (`POST /v2/vif/vod/jobs`) once its file is complete, live recordings and file-job clips alike. The job runs under the stream group config `analysis_config` names and is stored like any other analysis: it shows in the VOD Analysis page and in `GET /v2/vif/vod/jobs?tag=event-recording`.
 
-- A job reads its source from the VOD content directory. A clip written anywhere else (`output_path`, or an application whose storage directory is not the content directory) is copied into the content directory under its own name, with a `_1`, `_2` suffix when the name is taken; the original stays where it was written.
-- The listener calls the Engine's REST interface, so it needs `api_user` and `api_password` wherever that interface asks for credentials, and `api_url` when it is not `http://localhost:8087`.
+- A job reads its source from the VOD content directory. A clip written anywhere else (`output_path`, or an application whose storage directory is not the content directory) is copied into the `event-recording` folder of the content directory under its own name, with a `_1`, `_2` suffix when the name is taken; the original stays where it was written. The folder belongs to the listener: a copy is removed when its submission is refused, when its job is removed to make room, and once no `event-recording` job names it any more (its job was removed by the controller or by hand).
+- The content directory is the one the VOD settings name, taken the way the controller takes it: a relative `content_dir` is relative to the Engine's working directory. The controller applies a changed `content_dir` when the Engine restarts; until then submissions are refused and logged.
+- The controller keeps `max_jobs` jobs (VOD settings, 25 by default) and forgets the oldest finished one for every job past that, whoever submitted it. So that clips do not push out other jobs, at most `max_analysis_jobs` jobs tagged `event-recording` are kept, and never more than `max_jobs` − 1: before a clip is submitted the oldest finished ones are removed, results included. While all of them are still queued or running the clip waits and is tried again every 15 seconds, in order; up to 200 clips wait per listener, further ones are logged and not analysed. Waiting clips are not kept across an Engine restart.
+- The listener calls the Engine's REST interface, so it needs `api_user` and `api_password_secret` wherever that interface asks for credentials, and `api_url` when it is not `http://localhost:8087`. Basic and Digest (MD5 or SHA-256) authentication are answered. A Manager whose listener editor has no secret picker does not show `api_password_secret`; set it over the REST API there.
 - The jobs are tagged `event-recording`. A listener running inside a job with that tag still cuts its clips but submits none, so a config that analyses clips with this same listener does not analyse clips of clips.
 - A submission that fails is logged and does not affect the recording.
 

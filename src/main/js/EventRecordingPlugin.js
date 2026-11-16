@@ -20,11 +20,12 @@ window.VIF_LISTENER_PROPERTIES['EventRecordingPlugin'] = [
     { key: 'record_stream_name', label: 'Record Stream Name (Regex)', type: 'text', default: '', tooltip: 'Live only. Regex matching the stream to record. Empty = source stream. Use ".*-vi$" to record the VIF transcoder output (with overlays). Requires use_transcoder=true.' },
     { key: 'output_path', label: 'Output Path', type: 'text', default: '', tooltip: 'Directory for recorded files. Empty: the WSE application default live, the source file\'s directory on a job.' },
     { type: 'separator', label: 'Clip Analysis' },
-    { key: 'analyze_clips', label: 'Analyze Clips', type: 'boolean', default: false, tooltip: 'Submit every finished clip as a VOD analysis job of its own. A clip written outside the content directory is copied into it first.' },
+    { key: 'analyze_clips', label: 'Analyze Clips', type: 'boolean', default: false, tooltip: 'Submit every finished clip as a VOD analysis job of its own. A clip written outside the content directory is copied into its event-recording folder first.' },
     { key: 'analysis_config', label: 'Analysis Config', type: 'text', default: '', tooltip: 'The stream group config the clips are analysed with. Required when Analyze Clips is on.' },
     { key: 'api_url', label: 'API URL', type: 'text', default: '', tooltip: 'Base URL of the Engine REST interface the jobs are submitted to. Empty: http://localhost:8087.' },
     { key: 'api_user', label: 'API User', type: 'text', default: '', tooltip: 'Engine REST user. Empty when the REST interface asks for no credentials.' },
-    { key: 'api_password', label: 'API Password', type: 'text', default: '', tooltip: 'Password of the Engine REST user. Stored in the stream configuration as written.' },
+    { key: 'api_password_secret', label: 'API Password', type: 'secret', default: '', tooltip: 'The secret that holds the password of the Engine REST user, as named on the Secrets page.' },
+    { key: 'max_analysis_jobs', label: 'Maximum Analysis Jobs', type: 'number', default: 10, tooltip: 'How many clip analysis jobs are kept, over every listener. The oldest finished one is removed, with its copy of the clip, to make room for a new clip; while all of them are still queued or running the clip waits. Kept below Maximum Jobs of the VOD settings.' },
     { type: 'separator', label: 'Notifications' },
     { key: 'webhooks', label: 'Webhooks', type: 'boolean', default: true, tooltip: 'Send webhook events: detection start/stop live, recording started/stopped per clip on a file job' }
 ];

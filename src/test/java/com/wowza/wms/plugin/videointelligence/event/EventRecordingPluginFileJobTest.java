@@ -14,7 +14,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.Executor;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -311,9 +310,9 @@ public class EventRecordingPluginFileJobTest
 		EventRecordingPlugin plugin = new EventRecordingPlugin()
 		{
 			@Override
-			protected ClipAnalysis.Api analysisApi(String url, String user, String password)
+			protected ClipAnalysis.Api analysisApi(String url, String user, String passwordSecret)
 			{
-				clients.add(url + " " + user + " " + password);
+				clients.add(url + " " + user + " " + passwordSecret);
 				return new ClipAnalysis.Api()
 				{
 					@Override
@@ -331,13 +330,32 @@ public class EventRecordingPluginFileJobTest
 						calls.add("POST " + path + " " + json);
 						return "{\"job_id\":\"job-2\"}";
 					}
+
+					@Override
+					public void delete(String path)
+					{
+						calls.add("DELETE " + path);
+					}
 				};
 			}
 
 			@Override
-			protected Executor analysisExecutor()
+			protected ClipAnalysis.Worker analysisWorker()
 			{
-				return Runnable::run;
+				return new ClipAnalysis.Worker()
+				{
+					@Override
+					public void run(Runnable task)
+					{
+						task.run();
+					}
+
+					@Override
+					public void later(Runnable task)
+					{
+						calls.add("later");
+					}
+				};
 			}
 		};
 		HashMap<String, Object> properties = fileJobProperties(source, 500, 500, 300);
@@ -345,14 +363,15 @@ public class EventRecordingPluginFileJobTest
 		properties.put("analysis_config", "clips_config");
 		properties.put("api_url", "https://engine:8087");
 		properties.put("api_user", "admin");
-		properties.put("api_password", "s3cret");
+		properties.put("api_password_secret", "engine_rest");
 		plugin.onInit(null, namedStream("vod-job-1"), Set.of("immediate"), properties);
 
 		plugin.immediate(response(1500, "person"));
 		plugin.onShutdown(jobEnded(ShutdownEvent.Reason.JOB_COMPLETED));
 
-		assertEquals(List.of("https://engine:8087 admin s3cret"), clients);
+		assertEquals(List.of("https://engine:8087 admin engine_rest"), clients);
 		assertEquals(List.of("GET /vod/jobs/job-1", "GET /persist/vod-settings",
+				"GET /vod/jobs?tag=event-recording&limit=1000",
 				"POST /vod/jobs {\"file\":\"testsrc-320x240-30fps-4s_00.00.01.000_person.mp4\","
 						+ "\"stream_group_config\":\"clips_config\",\"tag\":\"event-recording\"}"),
 				calls);
@@ -366,7 +385,7 @@ public class EventRecordingPluginFileJobTest
 		EventRecordingPlugin plugin = new EventRecordingPlugin()
 		{
 			@Override
-			protected ClipAnalysis.Api analysisApi(String url, String user, String password)
+			protected ClipAnalysis.Api analysisApi(String url, String user, String passwordSecret)
 			{
 				clients.add(url);
 				return null;

@@ -61,14 +61,14 @@ public class VifApiTest
 	@Test
 	public void aReadIsAuthenticatedAndAnswersTheBody() throws IOException
 	{
-		assertEquals("{\"ok\":true}", new VifApi(url + "/", "admin", "s3cret").get("/persist/vod-settings"));
+		assertEquals("{\"ok\":true}", new VifApi(url + "/", "admin", () -> "s3cret").get("/persist/vod-settings"));
 		assertEquals(List.of("GET /v2/vif/persist/vod-settings null "), requests);
 	}
 
 	@Test
 	public void aPostCarriesItsJsonBody() throws IOException
 	{
-		assertEquals("{\"ok\":true}", new VifApi(url, "admin", "s3cret").post("/vod/jobs", "{\"file\":\"a.mp4\"}"));
+		assertEquals("{\"ok\":true}", new VifApi(url, "admin", () -> "s3cret").post("/vod/jobs", "{\"file\":\"a.mp4\"}"));
 		assertEquals(List.of("POST /v2/vif/vod/jobs application/json {\"file\":\"a.mp4\"}"), requests);
 	}
 
@@ -76,15 +76,36 @@ public class VifApiTest
 	public void aRefusalIsAnErrorCarryingTheStatusAndTheBody()
 	{
 		IOException refused = assertThrows(IOException.class,
-				() -> new VifApi(url, "admin", "s3cret").post("/refused", "{}"));
+				() -> new VifApi(url, "admin", () -> "s3cret").post("/refused", "{}"));
 		assertEquals("POST " + url + "/v2/vif/refused answered 400: {\"detail\":\"no such config\"}",
 				refused.getMessage());
 	}
 
 	@Test
-	public void wrongCredentialsAreAnError()
+	public void wrongCredentialsAreARefusalCarryingTheStatus()
 	{
-		assertThrows(IOException.class, () -> new VifApi(url, "admin", "wrong").get("/persist/vod-settings"));
+		ClipAnalysis.Refused refused = assertThrows(ClipAnalysis.Refused.class,
+				() -> new VifApi(url, "admin", () -> "wrong").get("/persist/vod-settings"));
+		assertEquals(401, refused.status());
 		assertEquals(List.of(), requests);
+	}
+
+	@Test
+	public void aDeleteIsSentAsOne() throws IOException
+	{
+		new VifApi(url, "admin", () -> "s3cret").delete("/vod/jobs/j1");
+		assertEquals(List.of("DELETE /v2/vif/vod/jobs/j1 null "), requests);
+	}
+
+	@Test
+	public void thePasswordIsReadAtEachRequest() throws IOException
+	{
+		String[] password = {"wrong"};
+		VifApi api = new VifApi(url, "admin", () -> password[0]);
+		assertThrows(ClipAnalysis.Refused.class, () -> api.get("/persist/vod-settings"));
+
+		password[0] = "s3cret";
+
+		assertEquals("{\"ok\":true}", api.get("/persist/vod-settings"));
 	}
 }

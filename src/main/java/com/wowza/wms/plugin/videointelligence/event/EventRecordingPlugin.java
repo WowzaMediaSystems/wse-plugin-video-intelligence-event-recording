@@ -17,7 +17,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -32,6 +31,7 @@ import com.wowza.wms.plugin.videointelligence.api.IVifEventListener;
 import com.wowza.wms.plugin.videointelligence.api.IVifService;
 import com.wowza.wms.plugin.videointelligence.api.ShutdownEvent;
 import com.wowza.wms.plugin.videointelligence.api.SinkRequirement;
+import com.wowza.wms.plugin.videointelligence.config.secrets.SecretsRuntime;
 import com.wowza.wms.plugin.videointelligence.eventrecording.LiveRecorderBackend;
 import com.wowza.wms.plugin.videointelligence.eventrecording.PresenceGate;
 import com.wowza.wms.plugin.videointelligence.eventrecording.RecordingBackend;
@@ -269,22 +269,28 @@ public class EventRecordingPlugin implements IVifEventListener, RecordingBackend
 			return null;
 		}
 		ClipAnalysis.Api api = analysisApi(trimmedOrNull(properties.get("api_url")),
-				trimmedOrNull(properties.get("api_user")), trimmedOrNull(properties.get("api_password")));
-		return new ClipAnalysis(logger, logPrefix, api, analysisExecutor(), config, jobId, engineHome());
+				trimmedOrNull(properties.get("api_user")), trimmedOrNull(properties.get("api_password_secret")));
+		return new ClipAnalysis(logger, logPrefix, api, analysisWorker(), config,
+				intProperty(properties, "max_analysis_jobs", ClipAnalysis.DEFAULT_MAX_JOBS), jobId, configHome());
 	}
 
-	/** The API the clips are submitted through; a test stands in for the Engine here. */
-	protected ClipAnalysis.Api analysisApi(String url, String user, String password)
+	/**
+	 * The API the clips are submitted through; a test stands in for the Engine here.
+	 *
+	 * @param passwordSecret the controller secret that holds the REST password, by name
+	 */
+	protected ClipAnalysis.Api analysisApi(String url, String user, String passwordSecret)
 	{
-		return new VifApi(url, user, password);
+		return new VifApi(url, user,
+				() -> SecretsRuntime.resolve(passwordSecret, "EventRecordingPlugin api_password_secret"));
 	}
 
-	protected Executor analysisExecutor()
+	protected ClipAnalysis.Worker analysisWorker()
 	{
-		return ClipAnalysis.sharedExecutor();
+		return ClipAnalysis.sharedWorker();
 	}
 
-	private static Path engineHome()
+	private static Path configHome()
 	{
 		String home = System.getProperty("com.wowza.wms.ConfigHome");
 		if (home == null || home.isBlank())
