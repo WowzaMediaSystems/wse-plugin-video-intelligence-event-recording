@@ -89,8 +89,8 @@ instance) and `record_stream_name` is ignored with one INFO line.
 ### `EventRecordingPlugin`
 
 - `onInit` parses the properties (1.0.0 names unchanged; `min_count`, `require_track`,
-  `merge_gap_ms`, `max_clip_ms` added), builds the gate and the backend, and resolves the Engine's
-  `WebhookListener` when `webhooks` is on.
+  `merge_gap_ms`, `max_clip_ms` added), builds the gate and the backend, and opens the webhook
+  channel when `webhooks` is on (see Webhook payloads).
 - `immediate` takes the response's `detectionWindow.fromTimeCode` as the clock, maps the detections
   to what the gate needs (class, tracking ID), feeds the gate under a lock and hands each transition
   to the backend, then `onClock`. Live, it also maintains the per-track table behind the
@@ -162,8 +162,13 @@ Unit tests never need it; there mp4parser is on the system classpath.
 
 ### Webhook payloads
 
-Uses the Engine's webhook framework (`WebhookListener`), event name `video.intelligence.detection`,
-data under `event_recording_data`. A job has no stream context: the context is built with the
+Two channels behind one `WebhookChannel`, picked in `onInit`. With a `url` on the listener,
+`VicWebhookChannel` hands each event to the controller's `DetectionWebhookNotifier` — the queue its
+own Webhook listener delivers through — in the controller's detection envelope, with the credential
+named by `credential_secret`. With no `url`, or on a controller that has no notifier (the reference
+to it is isolated in `VicNotifierQueue`, so its absence is a `LinkageError` caught in one place),
+`EngineWebhookChannel` publishes to the Engine's webhook framework (`WebhookListener`). Either way
+the event name is `video.intelligence.detection` and the data is under `event_recording_data`. A job has no stream context: the context is built with the
 default vhost, the `vod` application and `_definst_`, and every payload carries `job_id` and
 `source_file`.
 

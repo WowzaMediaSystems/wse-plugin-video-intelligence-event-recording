@@ -20,6 +20,10 @@ import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.wowza.wms.plugin.videointelligence.eventrecording.webhook.VicWebhookChannel;
+import com.wowza.wms.plugin.videointelligence.eventrecording.webhook.WebhookContext;
 import com.wowza.wms.plugin.videointelligence.api.ShutdownEvent;
 import com.wowza.wms.plugin.videointelligence.eventrecording.clip.Mp4FileClipper;
 import com.wowza.wms.plugin.videointelligence.message.BoundingBoxData;
@@ -298,5 +302,100 @@ public class EventRecordingPluginFileJobTest
 		List<Path> clips = clipsBeside(source);
 		assertEquals(1, clips.size());
 		assertEquals("testsrc-320x240-30fps-4s_cut.mp4", clips.get(0).getFileName().toString());
+	}
+
+	/** What the controller's queue was handed, in order. */
+	private static final class RecordingQueue implements VicWebhookChannel.Queue
+	{
+		final List<String> calls = new ArrayList<>();
+		final List<JsonNode> bodies = new ArrayList<>();
+
+		@Override
+		public synchronized void enqueue(String url, String secretName, String headerName, String body)
+		{
+			calls.add("enqueue " + url + " " + secretName + " " + headerName);
+			try
+			{
+				bodies.add(new ObjectMapper().readTree(body));
+			}
+			catch (IOException e)
+			{
+				throw new IllegalStateException(e);
+			}
+		}
+
+		@Override
+		public synchronized void release()
+		{
+			calls.add("release");
+		}
+	}
+
+	private static EventRecordingPlugin initialisedWith(VicWebhookChannel.Queue queue, List<String> asked,
+			HashMap<String, Object> properties)
+	{
+		EventRecordingPlugin plugin = new EventRecordingPlugin()
+		{
+			@Override
+			protected VicWebhookChannel.Queue controllerWebhookQueue(WebhookContext context, String listenerName)
+			{
+				asked.add(context.app() + "/" + context.appInstance() + "/" + context.stream() + "/" + listenerName);
+				return queue;
+			}
+		};
+		plugin.onInit(null, namedStream("vod-job-1"), Set.of("immediate"), properties);
+		return plugin;
+	}
+
+	@Test
+	public void aDestinationOnTheListenerIsDeliveredToThroughTheControllersWebhooks() throws IOException
+	{
+		Path source = sourceIn("job");
+		HashMap<String, Object> properties = fileJobProperties(source, 0, 0, 300);
+		properties.put("webhooks", true);
+		properties.put("url", " https://hooks.example.com/vi ");
+		properties.put("credential_secret", "hook-key");
+		properties.put("credential_header", "X-Api-Key");
+		properties.put("listener_name", "EventRecording");
+		RecordingQueue queue = new RecordingQueue();
+		List<String> asked = new ArrayList<>();
+		EventRecordingPlugin plugin = initialisedWith(queue, asked, properties);
+
+		plugin.immediate(response(1000, "person"));
+		plugin.onShutdown(jobEnded(ShutdownEvent.Reason.JOB_COMPLETED));
+
+		assertEquals(List.of("vod/_definst_/vod-job-1/EventRecording"), asked);
+		assertEquals(List.of("enqueue https://hooks.example.com/vi hook-key X-Api-Key",
+				"enqueue https://hooks.example.com/vi hook-key X-Api-Key", "release"), queue.calls);
+		String clip = clipsBeside(source).get(0).toString();
+		JsonNode started = queue.bodies.get(0);
+		assertEquals("video.intelligence.detection", started.path("name").asText());
+		assertEquals("vod-job-1", started.path("context").path("stream").asText());
+		JsonNode startedData = started.path("data").path("event_recording_data");
+		assertEquals("recording.started", startedData.path("action").asText());
+		assertEquals("job-1", startedData.path("job_id").asText());
+		assertEquals(clip, startedData.path("recording").path("file").asText());
+		JsonNode stoppedData = queue.bodies.get(1).path("data").path("event_recording_data");
+		assertEquals("recording.stopped", stoppedData.path("action").asText());
+		assertEquals(Files.size(Paths.get(clip)), stoppedData.path("size_bytes").asLong());
+	}
+
+	@Test
+	public void aUrlThatCannotBeDeliveredToDisablesTheWebhooks() throws IOException
+	{
+		Path source = sourceIn("job");
+		HashMap<String, Object> properties = fileJobProperties(source, 0, 0, 300);
+		properties.put("webhooks", true);
+		properties.put("url", "hooks.example.com/vi");
+		RecordingQueue queue = new RecordingQueue();
+		List<String> asked = new ArrayList<>();
+		EventRecordingPlugin plugin = initialisedWith(queue, asked, properties);
+
+		plugin.immediate(response(1000, "person"));
+		plugin.onShutdown(jobEnded(ShutdownEvent.Reason.JOB_COMPLETED));
+
+		assertEquals(1, clipsBeside(source).size());
+		assertEquals(List.of(), asked);
+		assertEquals(List.of(), queue.calls);
 	}
 }

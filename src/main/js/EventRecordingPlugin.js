@@ -20,5 +20,8 @@ window.VIF_LISTENER_PROPERTIES['EventRecordingPlugin'] = [
     { key: 'record_stream_name', label: 'Record Stream Name (Regex)', type: 'text', default: '', tooltip: 'Live only. Regex matching the stream to record. Empty = source stream. Use ".*-vi$" to record the VIF transcoder output (with overlays). Requires use_transcoder=true.' },
     { key: 'output_path', label: 'Output Path', type: 'text', default: '', tooltip: 'Directory for recorded files. Empty: the WSE application default live, the source file\'s directory on a job.' },
     { type: 'separator', label: 'Notifications' },
-    { key: 'webhooks', label: 'Webhooks', type: 'boolean', default: true, tooltip: 'Send webhook events: detection start/stop live, recording started/stopped per clip on a file job' }
+    { key: 'webhooks', label: 'Webhooks', type: 'boolean', default: true, tooltip: 'Send webhook events: detection start/stop live, recording started/stopped per clip on a file job. With a Destination URL they are POSTed there; with none they go to the Engine webhooks (Webhooks.json).' },
+    { key: 'url', label: 'Destination URL', type: 'text', tooltip: 'Where the events are POSTed: an absolute http(s) URL with a host, e.g. https://hooks.example.com/vi. Empty: the Engine webhooks are used instead.' },
+    { key: 'credential_secret', label: 'Credential Secret', type: 'secret', tooltip: 'A secret from the Secrets page, sent as the credential to the Destination URL. Only its name is stored here; the value is read at delivery.' },
+    { key: 'credential_header', label: 'Credential Header', type: 'text', hint: 'Authorization', tooltip: 'The header the credential is sent in. Blank uses "Authorization".' }
 ];

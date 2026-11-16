@@ -59,6 +59,8 @@ dependencies {
     // The controller's message classes carry Jackson annotations; without these the compiler
     // warns about every one of them.
     compileOnly 'com.fasterxml.jackson.core:jackson-annotations:2.17.2'
+    // The controller's webhook envelope is written with the Engine's own Jackson.
+    compileOnly 'com.fasterxml.jackson.core:jackson-databind:2.17.2'
     // The Engine ships isoparser/muxer 1.9.56 in lib/; the VOD clip cut runs on them. Tests run
     // outside the Engine and need them for real.
     compileOnly 'org.mp4parser:muxer:1.9.56'
